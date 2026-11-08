@@ -1,0 +1,60 @@
+# ==============================================================================
+# .gitignore - SIMRS Siloam Peduli
+# ==============================================================================
+
+# 1. Environment & Sensitive Credentials
+.env
+.env.*
+!.env.example
+.env.local
+.env.production
+.env.staging
+
+# 2. Reference & Client Requirement Materials (SOP PDFs & UML assets)
+referensi/
+PRD.md
+
+# 3. User Uploads & Media Generated During Testing
+assets/uploads/radiology/*
+!assets/uploads/radiology/.gitkeep
+
+# 4. Tooling, Scratches & Inspection Directories
+.taste-skill/
+scratch/
+tests/
+
+# 5. Temporary Cookies, Test Artifacts & Logs
+*.log
+cookie*.txt
+test_ck*.txt
+*.tmp
+
+# 6. Deployment & Cloud Build Caches
+.vercel/
+.vercel_build_output/
+
+# 7. Package Managers (if applicable)
+vendor/
+node_modules/
+
+# 8. IDE & Editor Artifacts
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+*~
+
+# 9. Operating System Files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
