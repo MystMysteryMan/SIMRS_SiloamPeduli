@@ -338,7 +338,7 @@
         </tr>
         <tr>
           <td>Total Hari Rawat (Bed-Days)</td>
-          <td class="text-end fw-bold font-mono"><?= $inpatient['total_bed_days'] ?> Hari</td>
+          <td class="text-end fw-bold font-mono"><?= $inpatient['total_bed_days'] ?? $inpatient['total_stay_days'] ?? 0 ?> Hari</td>
         </tr>
         <tr>
           <td>Average Length of Stay (ALOS)</td>
