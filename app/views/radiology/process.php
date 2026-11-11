@@ -3,9 +3,7 @@
 $isCito = ($order['clinical_priority'] === 'CITO');
 $st = $order['status'];
 $patAge = !empty($order['birth_date']) ? (date('Y') - date('Y', strtotime($order['birth_date']))) : '-';
-$isCloudImage = !empty($order['image_path']) && (str_starts_with($order['image_path'], 'http://') || str_starts_with($order['image_path'], 'https://'));
-$hasImage = !empty($order['image_path']) && ($isCloudImage || file_exists(__DIR__ . '/../../../' . $order['image_path']));
-$imgSizeKb = $isCloudImage ? 'Cloud Storage' : ($hasImage ? round(filesize(__DIR__ . '/../../../' . $order['image_path']) / 1024, 1) . ' KB' : '-');
+$hasImage = RadiologyModel::hasImage($order);
 ?>
 
 <div style="margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;">
@@ -118,7 +116,7 @@ $imgSizeKb = $isCloudImage ? 'Cloud Storage' : ($hasImage ? round(filesize(__DIR
       <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; border-bottom: 1px solid var(--border); padding-bottom: 10px;">
         <div style="display: flex; align-items: center; gap: 8px;">
           <i data-lucide="image" style="color: var(--blue-600); width: 18px; height: 18px;"></i>
-          <b style="color: var(--blue-900); font-size: 14px;">Citra Radiologi (Format WebP)</b>
+          <b style="color: var(--blue-900); font-size: 14px;">Citra Radiologi</b>
         </div>
         <?php if ($hasImage): ?>
           <span class="badge badge-success">
@@ -132,14 +130,14 @@ $imgSizeKb = $isCloudImage ? 'Cloud Storage' : ($hasImage ? round(filesize(__DIR
       <!-- Pratinjau Citra -->
       <?php if ($hasImage): ?>
         <div style="margin-bottom: 16px; text-align: center; background: #000; border-radius: 8px; overflow: hidden; padding: 8px;">
-          <a href="<?= base_url($order['image_path']) ?>" target="_blank" title="Klik untuk membuka citra ukuran penuh">
-            <img src="<?= base_url($order['image_path']) ?>" alt="Hasil Rontgen" 
+          <a href="<?= htmlspecialchars(base_url($order['image_path'])) ?>" target="_blank" title="Klik untuk membuka citra ukuran penuh">
+            <img src="<?= htmlspecialchars(base_url($order['image_path'])) ?>" alt="Hasil Rontgen"
                  style="max-width: 100%; max-height: 380px; object-fit: contain; display: block; margin: 0 auto;">
           </a>
         </div>
         <div style="font-size: 12px; color: var(--muted); margin-bottom: 14px; display: flex; justify-content: space-between;">
           <span>Berkas: <b><?= htmlspecialchars($order['image_filename']) ?></b></span>
-          <span>Ukuran: <b><?= $imgSizeKb ?> (&le; 1MB)</b></span>
+          <span>Citra tersimpan</span>
         </div>
         <?php if (!empty($order['technical_notes'])): ?>
           <div style="font-size: 12px; color: var(--slate-700); background: #f8fafc; padding: 8px 12px; border-radius: 6px; border: 1px solid var(--border); margin-bottom: 16px;">
@@ -155,7 +153,7 @@ $imgSizeKb = $isCloudImage ? 'Cloud Storage' : ($hasImage ? round(filesize(__DIR
       <?php endif; ?>
 
       <!-- Form Unggah Citra (Radiografer / Admin) -->
-      <?php if ($canUpload): ?>
+      <?php if ($canUpload && $st === 'PROCESS'): ?>
         <div style="border-top: 1px solid var(--border); padding-top: 14px;">
           <b style="font-size: 12.5px; color: var(--blue-950); display: block; margin-bottom: 10px;">
             <?= $hasImage ? 'Unggah Ulang / Ganti Citra:' : 'Unggah Citra Hasil Pemotretan:' ?>
@@ -168,7 +166,7 @@ $imgSizeKb = $isCloudImage ? 'Cloud Storage' : ($hasImage ? round(filesize(__DIR
               <label class="form-label" style="font-size: 12px;">Pilih Berkas Citra (JPG, PNG, atau WebP)</label>
               <input type="file" name="image" class="form-control" accept="image/jpeg,image/png,image/webp" required>
               <div style="font-size: 11px; color: var(--muted); margin-top: 4px;">
-                * Sistem otomatis mengonversi ke format <b>WebP teroptimasi maksimal 1MB</b> untuk efisiensi penyimpanan &amp; kecepatan transmisi.
+                Pilih citra JPG, PNG, atau WebP dengan ukuran maksimal <b>1 MB</b>.
               </div>
             </div>
 
@@ -180,7 +178,7 @@ $imgSizeKb = $isCloudImage ? 'Cloud Storage' : ($hasImage ? round(filesize(__DIR
 
             <button type="submit" class="btn btn-outline" style="width: 100%; height: 38px;">
               <i data-lucide="upload"></i>
-              <span>Unggah &amp; Konversi ke WebP</span>
+              <span>Unggah &amp; Simpan Citra</span>
             </button>
           </form>
         </div>
