@@ -8,7 +8,29 @@ require_once __DIR__ . '/../models/PatientModel.php';
 class RadiologyController extends Controller {
 
     public function __construct() {
-        $this->requireRole(['admin', 'radiografer', 'dokter_radiologi']);
+        // Images are also read from the existing EMR by doctors and nurses.
+        $roles = ['admin', 'radiografer', 'dokter_radiologi'];
+        if (strtolower((string)($_GET['a'] ?? '')) === 'image') {
+            $roles = array_merge($roles, ['dokter', 'perawat']);
+        }
+        $this->requireRole($roles);
+    }
+
+    public function image(): void {
+        $image = (new RadiologyModel())->getStoredImage((int)($_GET['id'] ?? 0));
+        $bytes = $image ? base64_decode($image['image_data'], true) : false;
+        header('Cache-Control: private, no-store, max-age=0');
+        header('X-Content-Type-Options: nosniff');
+        if (!$image || $bytes === false || strlen($bytes) !== (int)$image['byte_size']) {
+            http_response_code(404);
+            header('Content-Type: text/plain; charset=UTF-8');
+            echo 'Citra radiologi tidak ditemukan.';
+            return;
+        }
+        header('Content-Type: ' . $image['mime_type']);
+        header('Content-Length: ' . strlen($bytes));
+        header('Content-Disposition: inline');
+        echo $bytes;
     }
 
     /**
@@ -96,7 +118,7 @@ class RadiologyController extends Controller {
     }
 
     /**
-     * Radiografer Mengunggah Hasil Citra Radiologi (Otomatis WebP <= 1MB)
+     * Radiografer Mengunggah Hasil Citra Radiologi (JPG, PNG, WebP <= 1MB)
      */
     public function upload(): void {
         $this->requireRole(['admin', 'radiografer']);
