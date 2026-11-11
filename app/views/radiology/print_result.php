@@ -1,9 +1,7 @@
 <?php
 // app/views/radiology/print_result.php - Lembar Hasil & Ekspertise Radiologi Resmi
 $patAge = !empty($order['birth_date']) ? (date('Y') - date('Y', strtotime($order['birth_date']))) : '-';
-$isCloudImage = !empty($order['image_path']) && (str_starts_with($order['image_path'], 'http://') || str_starts_with($order['image_path'], 'https://'));
-$hasImage = !empty($order['image_path']) && ($isCloudImage || file_exists(__DIR__ . '/../../../' . $order['image_path']));
-$imgSizeText = $isCloudImage ? 'Cloud Storage' : ($hasImage ? round(filesize(__DIR__ . '/../../../' . $order['image_path']) / 1024, 1) . ' KB' : '-');
+$hasImage = RadiologyModel::hasImage($order);
 ?>
 <!DOCTYPE html>
 <html lang="id">
@@ -106,10 +104,10 @@ $imgSizeText = $isCloudImage ? 'Cloud Storage' : ($hasImage ? round(filesize(__D
   <!-- CITRA RADIOLOGI RESMI (WEBP) -->
   <?php if ($hasImage): ?>
     <div style="text-align: center; margin: 16px 0 24px; padding: 12px; background: #000; border-radius: 6px;">
-      <img src="<?= base_url($order['image_path']) ?>" alt="Citra Radiologi" 
+      <img src="<?= htmlspecialchars(base_url($order['image_path'])) ?>" alt="Citra Radiologi"
            style="max-height: 280px; max-width: 100%; object-fit: contain; display: block; margin: 0 auto;">
       <div style="color: #94a3b8; font-size: 9.5px; margin-top: 6px;">
-        Format Citra: WebP High-Efficiency (Ukuran: <?= $imgSizeText ?>)
+        Citra pemeriksaan radiologi
       </div>
     </div>
   <?php endif; ?>
