@@ -1,191 +1,67 @@
 <?php
-// app/controllers/RadiologyController.php - Radiologi (SOP/SIMRS/005/2026)
-
-require_once __DIR__ . '/../../core/Controller.php';
-require_once __DIR__ . '/../models/RadiologyModel.php';
-require_once __DIR__ . '/../models/PatientModel.php';
-
+require_once __DIR__.'/../../core/Controller.php';
+require_once __DIR__.'/../models/RadiologyModel.php';
 class RadiologyController extends Controller {
-
     public function __construct() {
-        $this->requireRole(['admin', 'radiografer', 'dokter_radiologi']);
+        $this->requireRole(in_array($_GET['a'] ?? '',['printResult','image'],true) ? ['admin','radiografer','dokter_radiologi','dokter','perawat'] : ['admin','radiografer','dokter_radiologi']);
     }
-
-    /**
-     * Daftar Permintaan Pemeriksaan Radiologi & Antrean Tindakan
-     */
     public function index(): void {
-        $radModel = new RadiologyModel();
-
-        $status = $_GET['status'] ?? null;
-        $priority = $_GET['priority'] ?? null;
-        $search = trim($_GET['search'] ?? '');
-        $page = max(1, (int)($_GET['page'] ?? 1));
-
-        $pagination = $radModel->paginateOrders($status, $priority, $search, $page, 15);
-        $stats = $radModel->getRadiologyStats();
-
-        $this->render('radiology/index', [
-            'pageTitle'        => 'Instalasi Radiologi & Diagnostik Imaging - SIMRS',
-            'orders'           => $pagination['data'],
-            'pagination'       => $pagination,
-            'selectedStatus'   => $status,
-            'selectedPriority' => $priority,
-            'search'           => $search,
-            'stats'            => $stats
-        ]);
+        $m=new RadiologyModel(); $status=$_GET['status'] ?? null; $priority=$_GET['priority'] ?? null; $search=trim((string)($_GET['search'] ?? ''));
+        $p=$m->paginateOrders($status,$priority,$search,max(1,(int)($_GET['page'] ?? 1)),15);
+        $this->render('radiology/index',['pageTitle'=>'Radiologi','orders'=>$p['data'],'pagination'=>$p,'selectedStatus'=>$status,'selectedPriority'=>$priority,'search'=>$search,'stats'=>$m->getRadiologyStats()]);
     }
-
-    /**
-     * Detail Order, Unggah Citra Medis (Radiografer), dan Ekspertise (Spesialis Radiologi)
-     */
+    private function order(int $id): array {
+        $order=(new RadiologyModel())->getOrderById($id);
+        if (!$order) { $this->setFlash('danger','Order radiologi tidak ditemukan.'); $this->redirect('index.php?c=radiology'); }
+        return $order;
+    }
     public function detail(): void {
-        $orderId = (int)($_GET['id'] ?? 0);
-        if ($orderId <= 0) {
-            $this->setFlash('danger', 'ID Order Radiologi tidak valid.');
-            $this->redirect('index.php?c=radiology&a=index');
-        }
-
-        $radModel = new RadiologyModel();
-        $order = $radModel->getOrderById($orderId);
-
-        if (!$order) {
-            $this->setFlash('danger', 'Data Order Radiologi tidak ditemukan.');
-            $this->redirect('index.php?c=radiology&a=index');
-        }
-
-        $userRole = strtolower($_SESSION['role'] ?? '');
-        $canUpload = in_array($userRole, ['admin', 'radiografer']);
-        $canExpertise = in_array($userRole, ['admin', 'dokter_radiologi', 'dokter']);
-
-        $this->render('radiology/process', [
-            'pageTitle'    => 'Pemeriksaan Radiologi - ' . $order['order_number'],
-            'order'        => $order,
-            'canUpload'    => $canUpload,
-            'canExpertise' => $canExpertise
-        ]);
+        $id=(int)($_GET['id'] ?? 0); $order=$this->order($id);
+        $input=$_SESSION['rad_input'][$id] ?? []; unset($_SESSION['rad_input'][$id]);
+        $this->render('radiology/process',['pageTitle'=>'Pemeriksaan Radiologi','order'=>$order,'input'=>$input,
+            'canUpload'=>ClinicalWorkflow::role()==='radiografer','canExpertise'=>ClinicalWorkflow::role()==='dokter_radiologi']);
     }
-
-    /**
-     * Radiografer memulai tindakan pemotretan (PENDING -> PROCESS)
-     */
+    private function post(array $roles): void {
+        $this->requireRole($roles);
+        if ($_SERVER['REQUEST_METHOD']!=='POST' || !verify_csrf()) { $this->setFlash('danger','Permintaan/token keamanan tidak valid.'); $this->redirect('index.php?c=radiology'); }
+    }
+    private function finish(array $result,int $id,string $action='detail'): void {
+        $this->setFlash($result['success']?'success':'danger',$result['message']); $this->redirect('index.php?c=radiology&a='.$action.'&id='.$id);
+    }
     public function process(): void {
-        $this->requireRole(['admin', 'radiografer']);
-        if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-            $this->redirect('index.php?c=radiology&a=index');
-        }
-
-        if (!verify_csrf()) {
-            $this->setFlash('danger', 'Token keamanan CSRF tidak valid.');
-            $this->redirect('index.php?c=radiology&a=index');
-        }
-
-        $orderId = (int)($_POST['order_id'] ?? 0);
-        $radiographerId = (int)($_SESSION['user_id'] ?? 0);
-
-        $radModel = new RadiologyModel();
-        $result = $radModel->processOrder($orderId, $radiographerId);
-
-        if ($result['success']) {
-            $this->setFlash('success', $result['message']);
-        } else {
-            $this->setFlash('danger', $result['message']);
-        }
-
-        $this->redirect('index.php?c=radiology&a=detail&id=' . $orderId);
+        $this->post(['radiografer']); $id=(int)($_POST['order_id'] ?? 0);
+        if (empty($_POST['verified'])) $this->finish(['success'=>false,'message'=>'Konfirmasi kesesuaian identitas pasien dan pemeriksaan.'],$id);
+        $this->finish((new RadiologyModel())->processOrder($id,(int)$_SESSION['user_id'],isset($_POST['revision'])?(int)$_POST['revision']:null,(string)($_POST['no_rm'] ?? ''),(string)($_POST['scheduled_at'] ?? '')),$id);
     }
-
-    /**
-     * Radiografer Mengunggah Hasil Citra Radiologi (Otomatis WebP <= 1MB)
-     */
     public function upload(): void {
-        $this->requireRole(['admin', 'radiografer']);
-        if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-            $this->redirect('index.php?c=radiology&a=index');
-        }
-
-        if (!verify_csrf()) {
-            $this->setFlash('danger', 'Token keamanan CSRF tidak valid.');
-            $this->redirect('index.php?c=radiology&a=index');
-        }
-
-        $orderId = (int)($_POST['order_id'] ?? 0);
-        $technicalNotes = trim($_POST['technical_notes'] ?? '');
-        $radiographerId = (int)($_SESSION['user_id'] ?? 0);
-
-        if ($orderId <= 0 || empty($_FILES['image']) || $_FILES['image']['error'] !== UPLOAD_ERR_OK) {
-            $this->setFlash('danger', 'Pilih berkas citra radiologi yang valid (JPG, PNG, atau WebP).');
-            $this->redirect('index.php?c=radiology&a=detail&id=' . $orderId);
-        }
-
-        $radModel = new RadiologyModel();
-        $result = $radModel->uploadImage($orderId, $_FILES['image'], $technicalNotes, $radiographerId);
-
-        if ($result['success']) {
-            $this->setFlash('success', $result['message']);
-        } else {
-            $this->setFlash('danger', $result['message']);
-        }
-
-        $this->redirect('index.php?c=radiology&a=detail&id=' . $orderId);
+        $this->post(['radiografer']); $id=(int)($_POST['order_id'] ?? 0);
+        $this->finish((new RadiologyModel())->uploadImage($id,$_FILES['image'] ?? [],(string)($_POST['technical_notes'] ?? ''),(int)$_SESSION['user_id'],isset($_POST['revision'])?(int)$_POST['revision']:null),$id);
     }
-
-    /**
-     * Dokter Spesialis Radiologi Mengisi Bacaan Ekspertise & Validasi (PROCESS -> VALID)
-     */
     public function saveExpertise(): void {
-        $this->requireRole(['admin', 'dokter_radiologi']);
-        if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-            $this->redirect('index.php?c=radiology&a=index');
-        }
-
-        if (!verify_csrf()) {
-            $this->setFlash('danger', 'Token keamanan CSRF tidak valid.');
-            $this->redirect('index.php?c=radiology&a=index');
-        }
-
-        $orderId = (int)($_POST['order_id'] ?? 0);
-        $findings = trim($_POST['expertise_findings'] ?? '');
-        $conclusion = trim($_POST['expertise_conclusion'] ?? '');
-        $radiologistId = (int)($_SESSION['user_id'] ?? 0);
-
-        if ($orderId <= 0 || empty($findings) || empty($conclusion)) {
-            $this->setFlash('danger', 'Temuan radiologi dan kesimpulan ekspertise wajib diisi lengkap.');
-            $this->redirect('index.php?c=radiology&a=detail&id=' . $orderId);
-        }
-
-        $radModel = new RadiologyModel();
-        $result = $radModel->saveExpertise($orderId, $findings, $conclusion, $radiologistId);
-
-        if ($result['success']) {
-            $this->setFlash('success', $result['message']);
-        } else {
-            $this->setFlash('danger', $result['message']);
-        }
-
-        $this->redirect('index.php?c=radiology&a=detail&id=' . $orderId);
+        $this->post(['dokter_radiologi']); $id=(int)($_POST['order_id'] ?? 0);
+        $r=(new RadiologyModel())->saveExpertise($id,(string)($_POST['expertise_findings'] ?? ''),(string)($_POST['expertise_conclusion'] ?? ''),(int)$_SESSION['user_id'],isset($_POST['revision'])?(int)$_POST['revision']:null);
+        if (!$r['success']) $_SESSION['rad_input'][$id]=['expertise_findings'=>(string)($_POST['expertise_findings'] ?? ''),'expertise_conclusion'=>(string)($_POST['expertise_conclusion'] ?? '')];
+        $this->finish($r,$id,$r['success']?'review':'detail');
     }
-
-    /**
-     * Cetak Lembar Hasil & Ekspertise Radiologi dengan Citra WebP
-     */
+    public function review(): void {
+        $this->requireRole(['dokter_radiologi']); $order=$this->order((int)($_GET['id'] ?? 0));
+        if ($order['status']!=='REVIEW' || empty($order['expertise_findings'])) $this->redirect('index.php?c=radiology&a=detail&id='.$order['id']);
+        $this->render('radiology/review',['pageTitle'=>'Tinjau Validasi Radiologi','order'=>$order]);
+    }
+    public function validateResult(): void {
+        $this->post(['dokter_radiologi']); $id=(int)($_POST['order_id'] ?? 0);
+        $this->finish((new RadiologyModel())->validateExpertise($id,(int)$_SESSION['user_id'],(int)($_POST['revision'] ?? -1),($_POST['decision'] ?? '')==='approve',(string)($_POST['reason'] ?? '')),$id);
+    }
     public function printResult(): void {
-        $orderId = (int)($_GET['id'] ?? 0);
-        if ($orderId <= 0) {
-            die('ID Order tidak valid.');
-        }
-
-        $radModel = new RadiologyModel();
-        $order = $radModel->getOrderById($orderId);
-
-        if (!$order) {
-            die('Order Radiologi tidak ditemukan.');
-        }
-
-        $this->render('radiology/print_result', [
-            'pageTitle' => 'Cetak Ekspertise Radiologi - ' . $order['order_number'],
-            'order'     => $order
-        ], false);
+        $order=$this->order((int)($_GET['id'] ?? 0));
+        if ($order['status']!=='VALID') { http_response_code(403); echo 'Laporan hanya tersedia untuk hasil yang sudah VALID.'; return; }
+        $this->render('radiology/print_result',['pageTitle'=>'Laporan Radiologi','order'=>$order],false);
+    }
+    public function image(): void {
+        $id=(int)($_GET['id'] ?? 0); $order=$this->order($id);
+        if ($order['status']!=='VALID' && !in_array(ClinicalWorkflow::role(),['radiografer','dokter_radiologi','admin'],true)) { http_response_code(403); echo 'Citra belum divalidasi.'; return; }
+        $file=(new RadiologyModel())->query('SELECT * FROM radiology_image_files WHERE radiology_order_id=?',[$id])[0] ?? null;
+        if (!$file) { http_response_code(404); echo 'Citra tidak ditemukan.'; return; }
+        ClinicalWorkflow::sendFile($file);
     }
 }
-

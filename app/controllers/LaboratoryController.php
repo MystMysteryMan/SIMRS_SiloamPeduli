@@ -1,156 +1,51 @@
 <?php
-// app/controllers/LaboratoryController.php - Laboratorium (SOP/SIMRS/004/2026)
-
-require_once __DIR__ . '/../../core/Controller.php';
-require_once __DIR__ . '/../models/LaboratoryModel.php';
-require_once __DIR__ . '/../models/PatientModel.php';
-require_once __DIR__ . '/../models/MasterDataModel.php';
-
+require_once __DIR__.'/../../core/Controller.php';
+require_once __DIR__.'/../models/LaboratoryModel.php';
 class LaboratoryController extends Controller {
-
     public function __construct() {
-        $this->requireRole(['admin', 'analis_laboratorium']);
+        $this->requireRole(($_GET['a'] ?? 'index')==='printResult' ? ['admin','analis_laboratorium','dokter','perawat','dokter_radiologi'] : ['admin','analis_laboratorium']);
     }
-
-    /**
-     * Daftar Permintaan Laboratorium & Antrean Pengujian
-     */
     public function index(): void {
-        $labModel = new LaboratoryModel();
-
-        $status = $_GET['status'] ?? null;
-        $priority = $_GET['priority'] ?? null;
-        $search = trim($_GET['search'] ?? '');
-        $page = max(1, (int)($_GET['page'] ?? 1));
-
-        $pagination = $labModel->paginateOrders($status, $priority, $search, $page, 15);
-        $stats = $labModel->getLabStats();
-
-        $this->render('laboratory/index', [
-            'pageTitle'        => 'Pemeriksaan Laboratorium Sentral - SIMRS',
-            'orders'           => $pagination['data'],
-            'pagination'       => $pagination,
-            'selectedStatus'   => $status,
-            'selectedPriority' => $priority,
-            'search'           => $search,
-            'stats'            => $stats
-        ]);
+        $m=new LaboratoryModel(); $status=$_GET['status'] ?? null; $priority=$_GET['priority'] ?? null; $search=trim((string)($_GET['search'] ?? ''));
+        $p=$m->paginateOrders($status,$priority,$search,max(1,(int)($_GET['page'] ?? 1)),15);
+        $this->render('laboratory/index',['pageTitle'=>'Laboratorium','orders'=>$p['data'],'pagination'=>$p,'selectedStatus'=>$status,'selectedPriority'=>$priority,'search'=>$search,'stats'=>$m->getLabStats()]);
     }
-
-    /**
-     * Halaman Detail & Input Hasil Pemeriksaan Laboratorium
-     */
     public function detail(): void {
-        $orderId = (int)($_GET['id'] ?? 0);
-        if ($orderId <= 0) {
-            $this->setFlash('danger', 'ID Order Laboratorium tidak valid.');
-            $this->redirect('index.php?c=laboratory&a=index');
-        }
-
-        $labModel = new LaboratoryModel();
-        $order = $labModel->getOrderById($orderId);
-
-        if (!$order) {
-            $this->setFlash('danger', 'Data Order Laboratorium tidak ditemukan.');
-            $this->redirect('index.php?c=laboratory&a=index');
-        }
-
-        $items = $labModel->getOrderItemsWithResults($orderId);
-
-        $this->render('laboratory/process', [
-            'pageTitle' => 'Proses Pengujian Lab - ' . $order['order_number'],
-            'order'     => $order,
-            'items'     => $items
-        ]);
+        $m=new LaboratoryModel(); $id=(int)($_GET['id'] ?? 0); $order=$m->getOrderById($id);
+        if (!$order) { $this->setFlash('danger','Order tidak ditemukan.'); $this->redirect('index.php?c=laboratory'); }
+        $input=$_SESSION['lab_input'][$id] ?? []; unset($_SESSION['lab_input'][$id]);
+        $this->render('laboratory/process',['pageTitle'=>'Pemeriksaan Laboratorium','order'=>$order,'items'=>$m->getOrderItemsWithResults($id),'input'=>$input,'canEdit'=>ClinicalWorkflow::role()==='analis_laboratorium']);
     }
-
-    /**
-     * Terima Permintaan & Ambil Sampel (PENDING -> PROCESS)
-     */
+    private function post(): void {
+        $this->requireRole(['analis_laboratorium']);
+        if ($_SERVER['REQUEST_METHOD']!=='POST' || !verify_csrf()) { $this->setFlash('danger','Permintaan/token keamanan tidak valid.'); $this->redirect('index.php?c=laboratory'); }
+    }
+    private function finish(array $result,int $id): void {
+        $this->setFlash($result['success']?'success':'danger',$result['message']); $this->redirect('index.php?c=laboratory&a=detail&id='.$id);
+    }
     public function process(): void {
-        $this->requireRole(['admin', 'analis_laboratorium']);
-        if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-            $this->redirect('index.php?c=laboratory&a=index');
-        }
-
-        if (!verify_csrf()) {
-            $this->setFlash('danger', 'Token keamanan CSRF tidak valid.');
-            $this->redirect('index.php?c=laboratory&a=index');
-        }
-
-        $orderId = (int)($_POST['order_id'] ?? 0);
-        $analystId = (int)($_SESSION['user_id'] ?? 0);
-
-        $labModel = new LaboratoryModel();
-        $result = $labModel->processOrder($orderId, $analystId);
-
-        if ($result['success']) {
-            $this->setFlash('success', $result['message']);
-        } else {
-            $this->setFlash('danger', $result['message']);
-        }
-
-        $this->redirect('index.php?c=laboratory&a=detail&id=' . $orderId);
+        $this->post(); $id=(int)($_POST['order_id'] ?? 0);
+        if (empty($_POST['verified'])) $this->finish(['success'=>false,'message'=>'Konfirmasi kesesuaian pasien dan jenis pemeriksaan terlebih dahulu.'],$id);
+        $this->finish((new LaboratoryModel())->processOrder($id,(int)$_SESSION['user_id'],isset($_POST['revision'])?(int)$_POST['revision']:null,trim((string)($_POST['no_rm'] ?? ''))),$id);
     }
-
-    /**
-     * Simpan Hasil Pengujian & Validasi Akhir (PROCESS -> VALID)
-     */
     public function saveResult(): void {
-        $this->requireRole(['admin', 'analis_laboratorium']);
-        if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-            $this->redirect('index.php?c=laboratory&a=index');
-        }
-
-        if (!verify_csrf()) {
-            $this->setFlash('danger', 'Token keamanan CSRF tidak valid.');
-            $this->redirect('index.php?c=laboratory&a=index');
-        }
-
-        $orderId = (int)($_POST['order_id'] ?? 0);
-        $results = $_POST['results'] ?? [];
-        $analystId = (int)($_SESSION['user_id'] ?? 0);
-
-        if ($orderId <= 0 || empty($results)) {
-            $this->setFlash('danger', 'Data hasil pemeriksaan tidak lengkap.');
-            $this->redirect('index.php?c=laboratory&a=detail&id=' . $orderId);
-        }
-
-        $labModel = new LaboratoryModel();
-        $res = $labModel->saveResults($orderId, $results, $analystId);
-
-        if ($res['success']) {
-            $this->setFlash('success', $res['message']);
-            $this->redirect('index.php?c=laboratory&a=detail&id=' . $orderId);
-        } else {
-            $this->setFlash('danger', $res['message']);
-            $this->redirect('index.php?c=laboratory&a=detail&id=' . $orderId);
-        }
+        $this->post(); $id=(int)($_POST['order_id'] ?? 0); $input=is_array($_POST['results'] ?? null)?$_POST['results']:[];
+        $r=(new LaboratoryModel())->saveResults($id,$input,(int)$_SESSION['user_id'],isset($_POST['revision'])?(int)$_POST['revision']:null);
+        if (!$r['success']) $_SESSION['lab_input'][$id]=$input;
+        $this->finish($r,$id);
     }
-
-    /**
-     * Cetak Lembar Hasil Pemeriksaan Laboratorium (Resmi & Terverifikasi)
-     */
+    public function validateResult(): void {
+        $this->post(); $id=(int)($_POST['order_id'] ?? 0);
+        if (($_POST['decision'] ?? '')==='approve' && empty($_POST['confirmed'])) $this->finish(['success'=>false,'message'=>'Konfirmasi pemeriksaan ulang hasil sebelum validasi.'],$id);
+        $this->finish((new LaboratoryModel())->reviewResults($id,(int)$_SESSION['user_id'],(int)($_POST['revision'] ?? -1),($_POST['decision'] ?? '')==='approve',trim((string)($_POST['reason'] ?? ''))),$id);
+    }
+    public function finalizeResult(): void {
+        $this->post(); $id=(int)($_POST['order_id'] ?? 0);
+        $this->finish((new LaboratoryModel())->finalizeResults($id,(int)$_SESSION['user_id'],(int)($_POST['revision'] ?? -1)),$id);
+    }
     public function printResult(): void {
-        $orderId = (int)($_GET['id'] ?? 0);
-        if ($orderId <= 0) {
-            die('ID Order tidak valid.');
-        }
-
-        $labModel = new LaboratoryModel();
-        $order = $labModel->getOrderById($orderId);
-
-        if (!$order) {
-            die('Order Laboratorium tidak ditemukan.');
-        }
-
-        $items = $labModel->getOrderItemsWithResults($orderId);
-
-        $this->render('laboratory/print_result', [
-            'pageTitle' => 'Cetak Hasil Laboratorium - ' . $order['order_number'],
-            'order'     => $order,
-            'items'     => $items
-        ], false);
+        $m=new LaboratoryModel(); $id=(int)($_GET['id'] ?? 0); $order=$m->getOrderById($id);
+        if (!$order || $order['status']!=='VALID') { http_response_code(403); echo 'Laporan hanya tersedia untuk hasil yang sudah VALID.'; return; }
+        $this->render('laboratory/print_result',['pageTitle'=>'Laporan Laboratorium','order'=>$order,'items'=>$m->getOrderItemsWithResults($id)],false);
     }
 }
-

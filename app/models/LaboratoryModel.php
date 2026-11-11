@@ -3,6 +3,7 @@
 
 require_once __DIR__ . '/../../core/Model.php';
 require_once __DIR__ . '/AuditLogModel.php';
+require_once __DIR__ . '/../services/ClinicalWorkflow.php';
 
 class LaboratoryModel extends Model {
     protected string $table = 'lab_orders';
@@ -11,6 +12,7 @@ class LaboratoryModel extends Model {
      * Generate Nomor Permintaan Lab unik: LAB-YYYYMMDD-XXXX
      */
     public function generateOrderNumber(): string {
+        if ($this->db->inTransaction()) $this->query("SELECT pg_advisory_xact_lock(hashtext('SIMRS_LABORATORY_NUMBER'))");
         $prefix = 'LAB-' . date('Ymd') . '-';
         $sql = "SELECT order_number FROM lab_orders WHERE order_number LIKE :prefix ORDER BY id DESC LIMIT 1";
         $row = $this->query($sql, [':prefix' => $prefix . '%']);
@@ -145,7 +147,7 @@ class LaboratoryModel extends Model {
 
         $sql .= "
             ORDER BY 
-                CASE WHEN lo.clinical_priority = 'CITO' AND lo.status IN ('PENDING', 'PROCESS') THEN 1 ELSE 2 END,
+                CASE WHEN lo.clinical_priority = 'CITO' AND lo.status IN ('PENDING', 'PROCESS', 'REVIEW', 'VALIDATED') THEN 1 ELSE 2 END,
                 lo.created_at DESC
         ";
 
@@ -160,9 +162,9 @@ class LaboratoryModel extends Model {
             SELECT 
                 COUNT(*) AS total,
                 COUNT(*) FILTER (WHERE status = 'PENDING') AS pending,
-                COUNT(*) FILTER (WHERE status = 'PROCESS') AS process,
+                COUNT(*) FILTER (WHERE status IN ('PROCESS', 'REVIEW', 'VALIDATED')) AS process,
                 COUNT(*) FILTER (WHERE status = 'VALID') AS valid,
-                COUNT(*) FILTER (WHERE clinical_priority = 'CITO' AND status IN ('PENDING', 'PROCESS')) AS cito
+                COUNT(*) FILTER (WHERE clinical_priority = 'CITO' AND status IN ('PENDING', 'PROCESS', 'REVIEW', 'VALIDATED')) AS cito
             FROM lab_orders
         ";
         $row = $this->query($sql)[0] ?? [];
@@ -210,7 +212,7 @@ class LaboratoryModel extends Model {
 
         $sql .= "
             ORDER BY 
-                CASE WHEN lo.clinical_priority = 'CITO' AND lo.status IN ('PENDING', 'PROCESS') THEN 1 ELSE 2 END,
+                CASE WHEN lo.clinical_priority = 'CITO' AND lo.status IN ('PENDING', 'PROCESS', 'REVIEW', 'VALIDATED') THEN 1 ELSE 2 END,
                 lo.created_at DESC
         ";
 
@@ -268,121 +270,88 @@ class LaboratoryModel extends Model {
     /**
      * Analis menerima & memproses order laboratorium (Status: PENDING -> PROCESS)
      */
-    public function processOrder(int $orderId, int $analystId): array {
-        $order = $this->getOrderById($orderId);
-        if (!$order) {
-            return ['success' => false, 'message' => 'Order Laboratorium tidak ditemukan.'];
-        }
-
-        if ($order['status'] === 'CANCELLED') {
-            return ['success' => false, 'message' => 'Order telah dibatalkan dan tidak dapat diproses.'];
-        }
-
-        $this->execute(
-            "UPDATE lab_orders SET status = 'PROCESS', analyst_id = :aid WHERE id = :id",
-            [':aid' => $analystId, ':id' => $orderId]
-        );
-
-        AuditLogModel::log(
-            'PROCESS_LAB_ORDER',
-            'LABORATORY',
-            "Analis mengambil sampel dan mulai memproses Order Lab #{$order['order_number']}",
-            $analystId
-        );
-
-        return ['success' => true, 'message' => "Order #{$order['order_number']} beralih ke status PROSES PEMERIKSAAN."];
+    private function lockedOrder(int $id, int $actorId, ?int $revision): array {
+        ClinicalWorkflow::requireRole(['analis_laboratorium']);
+        if ($actorId !== (int)$_SESSION['user_id']) throw new DomainException('Identitas analis tidak sesuai sesi.');
+        $row = $this->query('SELECT * FROM lab_orders WHERE id=? FOR UPDATE', [$id])[0] ?? null;
+        if (!$row) throw new DomainException('Order laboratorium tidak ditemukan.');
+        ClinicalWorkflow::revision($row,$revision);
+        ClinicalWorkflow::orderLinks($this->db,$row);
+        return $row;
+    }
+    public function processOrder(int $orderId, int $analystId, ?int $revision = null, string $noRm = ''): array {
+        return ClinicalWorkflow::transaction($this->db,function () use ($orderId,$analystId,$revision,$noRm) {
+            $order=$this->lockedOrder($orderId,$analystId,$revision);
+            if ($order['status'] !== 'PENDING') throw new DomainException('Hanya order menunggu yang dapat mulai diproses.');
+            $patient=$this->query('SELECT no_rm FROM patients WHERE id=?',[$order['patient_id']])[0] ?? [];
+            if (!hash_equals((string)($patient['no_rm'] ?? ''),trim($noRm)) || trim($noRm)==='') throw new DomainException('Nomor RM tidak cocok. Verifikasi kembali identitas pasien dan pemeriksaan.');
+            $this->execute("UPDATE lab_orders SET status='PROCESS',analyst_id=?,revision=revision+1 WHERE id=?",[$analystId,$orderId]);
+            ClinicalWorkflow::audit($this->db,'VERIFY_PROCESS_LAB','LABORATORY',"Verifikasi pasien #{$order['patient_id']}; order #$orderId");
+            return ['success'=>true,'message'=>'Identitas dan order terverifikasi. Pemeriksaan dalam proses.'];
+        });
+    }
+    public function saveResults(int $orderId, array $resultsData, int $analystId, ?int $revision = null): array {
+        return ClinicalWorkflow::transaction($this->db,function () use ($orderId,$resultsData,$analystId,$revision) {
+            $order=$this->lockedOrder($orderId,$analystId,$revision);
+            if ($order['status'] !== 'PROCESS') throw new DomainException('Input hanya tersedia saat pemeriksaan dalam proses.');
+            $items=$this->getOrderItemsWithResults($orderId);
+            $ids=array_map('intval',array_column($items,'id')); sort($ids);
+            $submitted=array_map('intval',array_keys($resultsData)); sort($submitted);
+            if (!$ids || $ids !== $submitted) throw new DomainException('Item hasil harus sesuai seluruh pemeriksaan pada order ini.');
+            $prepared=[];
+            foreach ($items as $item) {
+                $input=$resultsData[$item['id']];
+                if (!is_array($input)) throw new DomainException('Format hasil tidak valid.');
+                $value=ClinicalWorkflow::text($input['result_value'] ?? '',100);
+                if ($value==='') throw new DomainException("Nilai hasil {$item['test_name']} wajib diisi.");
+                $unit=strtolower(trim((string)$item['default_unit']));
+                $numericUnit=in_array($unit,['g/dl','mg/dl','mmol/l','u/l','iu/l','%','/µl','/μl','/ul','10^3/µl','10^3/ul'],true);
+                if ($numericUnit && (!is_numeric($value) || !is_finite((float)$value) || (float)$value < 0)) throw new DomainException('Format nilai hasil pemeriksaan harus berupa angka tidak negatif.');
+                $flag=$input['result_flag'] ?? 'NORMAL';
+                if (!in_array($flag,['NORMAL','HIGH','LOW','CRITICAL'],true)) throw new DomainException('Flag hasil tidak valid.');
+                $prepared[]=['id'=>$item['id'],'value'=>$value,'range'=>ClinicalWorkflow::text($input['normal_range'] ?? $item['default_normal_range'],100),'unit'=>ClinicalWorkflow::text($input['unit'] ?? $item['default_unit'],30),'flag'=>$flag,'notes'=>ClinicalWorkflow::text($input['analyst_notes'] ?? '')];
+            }
+            foreach ($prepared as $p) {
+                $exists=$this->query('SELECT id FROM lab_results WHERE lab_order_item_id=?',[$p['id']]);
+                if ($exists) $this->execute('UPDATE lab_results SET result_value=?,normal_range=?,unit=?,result_flag=?,analyst_notes=?,validated_at=NULL WHERE lab_order_item_id=?',[$p['value'],$p['range'],$p['unit'],$p['flag'],$p['notes'],$p['id']]);
+                else $this->execute('INSERT INTO lab_results (lab_order_item_id,result_value,normal_range,unit,result_flag,analyst_notes,validated_at) VALUES (?,?,?,?,?,?,NULL)',[$p['id'],$p['value'],$p['range'],$p['unit'],$p['flag'],$p['notes']]);
+            }
+            $this->execute("UPDATE lab_orders SET status='REVIEW',analyst_id=?,revision=revision+1 WHERE id=?",[$analystId,$orderId]);
+            ClinicalWorkflow::audit($this->db,'SAVE_LAB_DRAFT','LABORATORY',"Draf order #$orderId; belum hasil final");
+            return ['success'=>true,'message'=>'Draf hasil tersimpan. Tinjau seluruh hasil sebelum validasi.'];
+        });
+    }
+    public function reviewResults(int $orderId, int $analystId, int $revision, bool $approve, string $reason = ''): array {
+        return ClinicalWorkflow::transaction($this->db,function () use ($orderId,$analystId,$revision,$approve,$reason) {
+            $order=$this->lockedOrder($orderId,$analystId,$revision);
+            if ($order['status'] !== 'REVIEW') throw new DomainException('Hasil belum siap ditinjau atau sudah diterbitkan.');
+            if ($approve) {
+                $items=$this->getOrderItemsWithResults($orderId);
+                if (!$items) throw new DomainException('Order tidak memiliki item pemeriksaan.');
+                foreach ($items as $item) if (!$item['result_id'] || trim((string)$item['result_value'])==='') throw new DomainException('Seluruh hasil harus terisi sebelum validasi.');
+                $this->execute("UPDATE lab_orders SET status='VALIDATED',validated_at=NOW(),validated_by=?,revision=revision+1 WHERE id=?",[$analystId,$orderId]);
+            } else {
+                $reason=ClinicalWorkflow::text($reason);
+                if ($reason==='') throw new DomainException('Alasan perbaikan wajib diisi.');
+                $this->execute("UPDATE lab_orders SET status='PROCESS',review_notes=?,revision=revision+1 WHERE id=?",[$reason,$orderId]);
+            }
+            ClinicalWorkflow::audit($this->db,$approve?'VALIDATE_LAB_RESULTS':'RETURN_LAB_DRAFT','LABORATORY',"Order #$orderId");
+            return ['success'=>true,'message'=>$approve?'Hasil dinyatakan valid. Klik Simpan hasil pemeriksaan agar tersedia di EMR.':'Hasil dikembalikan ke formulir input untuk diperbaiki.'];
+        });
     }
 
-    /**
-     * Simpan Hasil Pemeriksaan dan Validasi Analis (Status: PROCESS -> VALID)
-     */
-    public function saveResults(int $orderId, array $resultsData, int $analystId): array {
-        $order = $this->getOrderById($orderId);
-        if (!$order) {
-            return ['success' => false, 'message' => 'Order Laboratorium tidak ditemukan.'];
-        }
-
-        if ($order['status'] === 'CANCELLED') {
-            return ['success' => false, 'message' => 'Order telah dibatalkan.'];
-        }
-
-        $items = $this->getOrderItemsWithResults($orderId);
-        if (empty($items)) {
-            return ['success' => false, 'message' => 'Tidak ada item pemeriksaan dalam order ini.'];
-        }
-
-        // Simpan setiap item hasil pemeriksaan
-        foreach ($items as $item) {
-            $itemId = $item['id'];
-            $input = $resultsData[$itemId] ?? null;
-
-            if (!$input || !isset($input['result_value']) || trim($input['result_value']) === '') {
-                return [
-                    'success' => false,
-                    'message' => "Nilai hasil untuk pemeriksaan '{$item['test_name']}' wajib diisi!"
-                ];
-            }
-
-            $resVal = trim($input['result_value']);
-            $normRange = trim($input['normal_range'] ?? $item['default_normal_range'] ?? '');
-            $unit = trim($input['unit'] ?? $item['default_unit'] ?? '');
-            $flag = in_array($input['result_flag'] ?? '', ['NORMAL', 'HIGH', 'LOW', 'CRITICAL']) ? $input['result_flag'] : 'NORMAL';
-            $notes = clean($input['analyst_notes'] ?? '');
-
-            // Upsert lab_results
-            $existingRes = $this->query("SELECT id FROM lab_results WHERE lab_order_item_id = :item_id LIMIT 1", [':item_id' => $itemId]);
-            if (!empty($existingRes)) {
-                $this->execute(
-                    "UPDATE lab_results SET
-                        result_value = :val,
-                        normal_range = :range,
-                        unit = :unit,
-                        result_flag = :flag,
-                        analyst_notes = :notes,
-                        validated_at = NOW()
-                     WHERE lab_order_item_id = :item_id",
-                    [
-                        ':val'     => $resVal,
-                        ':range'   => $normRange,
-                        ':unit'    => $unit,
-                        ':flag'    => $flag,
-                        ':notes'   => $notes,
-                        ':item_id' => $itemId
-                    ]
-                );
-            } else {
-                $this->execute(
-                    "INSERT INTO lab_results (lab_order_item_id, result_value, normal_range, unit, result_flag, analyst_notes, validated_at)
-                     VALUES (:item_id, :val, :range, :unit, :flag, :notes, NOW())",
-                    [
-                        ':item_id' => $itemId,
-                        ':val'     => $resVal,
-                        ':range'   => $normRange,
-                        ':unit'    => $unit,
-                        ':flag'    => $flag,
-                        ':notes'   => $notes
-                    ]
-                );
-            }
-        }
-
-        // Tandai status order menjadi VALID
-        $this->execute(
-            "UPDATE lab_orders SET status = 'VALID', completed_at = NOW(), analyst_id = :aid WHERE id = :id",
-            [':aid' => $analystId, ':id' => $orderId]
-        );
-
-        AuditLogModel::log(
-            'VALIDATE_LAB_RESULTS',
-            'LABORATORY',
-            "Hasil Laboratorium Order #{$order['order_number']} telah divalidasi oleh Analis",
-            $analystId
-        );
-
-        return [
-            'success' => true,
-            'message' => "Hasil Laboratorium Order #{$order['order_number']} berhasil divalidasi."
-        ];
+    public function finalizeResults(int $orderId, int $analystId, int $revision): array {
+        return ClinicalWorkflow::transaction($this->db,function () use ($orderId,$analystId,$revision) {
+            $order=$this->lockedOrder($orderId,$analystId,$revision);
+            if ($order['status'] !== 'VALIDATED') throw new DomainException('Hasil harus divalidasi sebelum disimpan ke rekam medis.');
+            $items=$this->getOrderItemsWithResults($orderId);
+            if (!$items) throw new DomainException('Order tidak memiliki hasil.');
+            foreach ($items as $item) if (!$item['result_id'] || trim((string)$item['result_value'])==='') throw new DomainException('Seluruh hasil harus terisi.');
+            $this->execute('UPDATE lab_results SET validated_at=? WHERE lab_order_item_id IN (SELECT id FROM lab_order_items WHERE lab_order_id=?)',[$order['validated_at'],$orderId]);
+            $this->execute("UPDATE lab_orders SET status='VALID',completed_at=NOW(),saved_by=?,analyst_id=?,revision=revision+1 WHERE id=?",[$analystId,$analystId,$orderId]);
+            ClinicalWorkflow::audit($this->db,'SAVE_LAB_RESULTS','LABORATORY',"Hasil tersimpan untuk pasien #{$order['patient_id']}; order #$orderId");
+            return ['success'=>true,'message'=>'Hasil pemeriksaan berhasil disimpan ke rekam medis pasien. Laporan siap dicetak.'];
+        });
     }
 
     /**
@@ -404,8 +373,8 @@ class LaboratoryModel extends Model {
             $pIds = implode(',', array_map('intval', $orderIds));
             $sqlItems = "
                 SELECT loi.*, 
-                       lr.id AS result_id, lr.result_value, lr.unit AS result_unit, lr.normal_range AS result_ref,
-                       lr.result_flag, lr.analyst_notes AS result_notes,
+                       lr.id AS result_id, lr.result_value, lr.unit AS result_unit, lr.normal_range AS result_normal_range,
+                       lr.result_flag, lr.analyst_notes,
                        lt.test_name, lt.unit AS default_unit
                 FROM lab_order_items loi
                 LEFT JOIN lab_results lr ON loi.id = lr.lab_order_item_id
@@ -419,7 +388,7 @@ class LaboratoryModel extends Model {
                 $itemsMap[$it['lab_order_id']][] = $it;
             }
             foreach ($orders as &$ord) {
-                $ord['items'] = $itemsMap[$ord['id']] ?? [];
+                $ord['items'] = $ord['status'] === 'VALID' ? ($itemsMap[$ord['id']] ?? []) : [];
             }
             unset($ord);
         }

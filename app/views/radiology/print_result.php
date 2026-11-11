@@ -1,9 +1,7 @@
 <?php
 // app/views/radiology/print_result.php - Lembar Hasil & Ekspertise Radiologi Resmi
 $patAge = !empty($order['birth_date']) ? (date('Y') - date('Y', strtotime($order['birth_date']))) : '-';
-$isCloudImage = !empty($order['image_path']) && (str_starts_with($order['image_path'], 'http://') || str_starts_with($order['image_path'], 'https://'));
-$hasImage = !empty($order['image_path']) && ($isCloudImage || file_exists(__DIR__ . '/../../../' . $order['image_path']));
-$imgSizeText = $isCloudImage ? 'Cloud Storage' : ($hasImage ? round(filesize(__DIR__ . '/../../../' . $order['image_path']) / 1024, 1) . ' KB' : '-');
+$hasImage = !empty($order['image_path']);
 ?>
 <!DOCTYPE html>
 <html lang="id">
@@ -45,7 +43,7 @@ $imgSizeText = $isCloudImage ? 'Cloud Storage' : ($hasImage ? round(filesize(__D
 
 <!-- Action Bar (Hidden on Print) -->
 <div class="no-print" style="max-width: 800px; margin: 0 auto 16px; display: flex; justify-content: space-between; align-items: center;">
-  <a href="<?= base_url('index.php?c=radiology&a=detail&id=' . $order['id']) ?>" class="btn btn-outline" style="font-size: 12.5px;">
+  <a href="<?= base_url(in_array(ClinicalWorkflow::role(), ['dokter','perawat','dokter spesialis','dpjp','kepala_ruang'], true) ? 'index.php?c=emr&a=history&patient_id=' . $order['patient_id'] : 'index.php?c=radiology&a=detail&id=' . $order['id']) ?>" class="btn btn-outline" style="font-size: 12.5px;">
     <i data-lucide="arrow-left"></i>
     <span>Kembali ke Detail Order</span>
   </a>
@@ -109,7 +107,7 @@ $imgSizeText = $isCloudImage ? 'Cloud Storage' : ($hasImage ? round(filesize(__D
       <img src="<?= base_url($order['image_path']) ?>" alt="Citra Radiologi" 
            style="max-height: 280px; max-width: 100%; object-fit: contain; display: block; margin: 0 auto;">
       <div style="color: #94a3b8; font-size: 9.5px; margin-top: 6px;">
-        Format Citra: WebP High-Efficiency (Ukuran: <?= $imgSizeText ?>)
+        Citra pemeriksaan: <?= htmlspecialchars($order['image_filename']) ?>
       </div>
     </div>
   <?php endif; ?>

@@ -42,7 +42,7 @@ $patAge = !empty($order['birth_date']) ? (date('Y') - date('Y', strtotime($order
 
 <!-- Action Bar (Hidden on Print) -->
 <div class="no-print" style="max-width: 800px; margin: 0 auto 16px; display: flex; justify-content: space-between; align-items: center;">
-  <a href="<?= base_url('index.php?c=laboratory&a=detail&id=' . $order['id']) ?>" class="btn btn-outline" style="font-size: 12.5px;">
+  <a href="<?= base_url(in_array(ClinicalWorkflow::role(), ['dokter','perawat','dokter_radiologi','dokter spesialis','dpjp','kepala_ruang'], true) ? 'index.php?c=emr&a=history&patient_id=' . $order['patient_id'] : 'index.php?c=laboratory&a=detail&id=' . $order['id']) ?>" class="btn btn-outline" style="font-size: 12.5px;">
     <i data-lucide="arrow-left"></i>
     <span>Kembali ke Detail Order</span>
   </a>

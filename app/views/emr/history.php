@@ -109,7 +109,7 @@ $patAge = !empty($patient['birth_date']) ? (date('Y') - date('Y', strtotime($pat
             </div>
             <div style="text-align: right;">
               <span class="badge badge-primary font-mono" style="font-size: 13px;">
-                ICD-10: <?= htmlspecialchars($rec['icd10_code'] ?? '-') ?>
+                <?= htmlspecialchars($rec['status']) ?> · ICD-10: <?= htmlspecialchars($rec['icd10_code'] ?? '-') ?>
               </span>
               <div style="font-size: 13px; font-weight: 600; color: var(--blue-800); margin-top: 2px;">
                 <?= htmlspecialchars($rec['diagnosis_name'] ?? '-') ?>
@@ -156,6 +156,10 @@ $patAge = !empty($patient['birth_date']) ? (date('Y') - date('Y', strtotime($pat
   <?php endif; ?>
 </div>
 
+<div class="card" style="padding:20px;margin:20px 0"><h2 style="font-size:17px">Lampiran dan catatan keperawatan</h2>
+<?php foreach ($records as $rec): if (empty($rec['nurse_notes'])) continue; ?><p><b>Kunjungan <?= format_date_id($rec['appointment_date']) ?>:</b> <?= nl2br(htmlspecialchars($rec['nurse_notes'])) ?></p><?php endforeach; ?>
+<?php foreach ($attachments as $attachment): ?><p><a target="_blank" rel="noopener" href="<?= base_url('index.php?c=emr&a=attachment&id='.$attachment['id']) ?>"><?= htmlspecialchars($attachment['filename']) ?></a> · Kunjungan #<?= (int)$attachment['appointment_id'] ?> · <?= htmlspecialchars($attachment['uploader']) ?></p><?php endforeach; ?>
+<?php if (!$attachments): ?><p>Belum ada lampiran.</p><?php endif; ?></div>
 <!-- TAB 2: RIWAYAT LABORATORIUM -->
 <div id="tabContentLab" style="display: none;">
   <?php if (empty($labHistory)): ?>
@@ -277,13 +281,13 @@ $patAge = !empty($patient['birth_date']) ? (date('Y') - date('Y', strtotime($pat
           <div style="display: grid; grid-template-columns: 240px 1fr; gap: 18px; align-items: flex-start;">
             <!-- Pratinjau Citra WebP -->
             <div>
-              <?php if (!empty($rh['image_path']) && file_exists(__DIR__ . '/../../../' . $rh['image_path'])): ?>
+              <?php if (!empty($rh['image_path']) && $rh['status'] === 'VALID'): ?>
                 <a href="<?= base_url($rh['image_path']) ?>" target="_blank" title="Klik untuk memperbesar citra radiologi">
                   <img src="<?= base_url($rh['image_path']) ?>" alt="Citra Radiologi" 
                        style="width: 100%; height: 180px; object-fit: cover; border-radius: 6px; border: 1px solid var(--border); background: #000;">
                 </a>
                 <div style="font-size: 11px; color: var(--muted); text-align: center; margin-top: 4px;">
-                  Format WebP (Terkompresi)
+                  Citra pemeriksaan tersimpan
                 </div>
               <?php else: ?>
                 <div style="width: 100%; height: 160px; background: #f1f5f9; border: 1px dashed var(--border); border-radius: 6px; display: flex; flex-direction: column; align-items: center; justify-content: center; color: var(--muted); font-size: 12px;">

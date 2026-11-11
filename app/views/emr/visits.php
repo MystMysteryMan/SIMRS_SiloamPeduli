@@ -1,0 +1,8 @@
+<a class="btn btn-outline" href="<?= base_url('index.php?c=emr') ?>">Kembali ke Pencarian</a>
+<h1 style="color:var(--blue-900)">Pilih Kunjungan</h1>
+<div class="card" style="padding:20px;margin-bottom:20px"><h2 style="font-size:18px"><?= htmlspecialchars($patient['full_name']) ?></h2><p>No. RM <b><?= htmlspecialchars($patient['no_rm']) ?></b> · NIK <?= htmlspecialchars($patient['nik']) ?> · <?= format_date_id($patient['birth_date']) ?></p>
+<a class="btn btn-outline" href="<?= base_url('index.php?c=emr&a=history&patient_id='.$patient['id']) ?>">Lihat Seluruh Riwayat Medis</a></div>
+<div class="card" style="padding:20px"><p>Pilih tanggal kunjungan yang akan dibuka. Identitas pasien tetap sama pada setiap tahap.</p><div class="table-responsive"><table class="table"><thead><tr><th>Tanggal / Antrean</th><th>Poliklinik</th><th>Dokter</th><th>Status</th><th>Aksi</th></tr></thead><tbody>
+<?php foreach ($visits as $visit): ?><tr><td><?= format_date_id($visit['appointment_date']) ?><br><?= htmlspecialchars($visit['queue_number']) ?></td><td><?= htmlspecialchars($visit['policlinic_name']) ?></td><td><?= htmlspecialchars($visit['doctor_name']) ?></td><td><span class="badge badge-secondary"><?= htmlspecialchars($visit['status']) ?></span></td><td><a class="btn btn-primary" href="<?= base_url('index.php?c=emr&a=examine&id='.$visit['id']) ?>">Buka EMR</a></td></tr><?php endforeach; ?>
+<?php if (!$visits): ?><tr><td colspan="5">Pasien sudah terdaftar, tetapi belum memiliki kunjungan. Petugas registrasi perlu membuat kunjungan terlebih dahulu melalui modul Antrean &amp; Janji Temu.</td></tr><?php endif; ?>
+</tbody></table></div></div>

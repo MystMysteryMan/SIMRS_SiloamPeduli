@@ -3,6 +3,7 @@
 
 require_once __DIR__ . '/../../core/Model.php';
 require_once __DIR__ . '/AuditLogModel.php';
+require_once __DIR__ . '/../services/ClinicalWorkflow.php';
 
 class RadiologyModel extends Model {
     protected string $table = 'radiology_orders';
@@ -11,6 +12,7 @@ class RadiologyModel extends Model {
      * Generate Nomor Permintaan Radiologi unik: RAD-YYYYMMDD-XXXX
      */
     public function generateOrderNumber(): string {
+        if ($this->db->inTransaction()) $this->query("SELECT pg_advisory_xact_lock(hashtext('SIMRS_RADIOLOGY_NUMBER'))");
         $prefix = 'RAD-' . date('Ymd') . '-';
         $sql = "SELECT order_number FROM radiology_orders WHERE order_number LIKE :prefix ORDER BY id DESC LIMIT 1";
         $row = $this->query($sql, [':prefix' => $prefix . '%']);
@@ -128,7 +130,7 @@ class RadiologyModel extends Model {
 
         $sql .= "
             ORDER BY 
-                CASE WHEN ro.clinical_priority = 'CITO' AND ro.status IN ('PENDING', 'PROCESS') THEN 1 ELSE 2 END,
+                CASE WHEN ro.clinical_priority = 'CITO' AND ro.status IN ('PENDING', 'PROCESS', 'REVIEW') THEN 1 ELSE 2 END,
                 ro.created_at DESC
         ";
 
@@ -143,9 +145,9 @@ class RadiologyModel extends Model {
             SELECT 
                 COUNT(*) AS total,
                 COUNT(*) FILTER (WHERE status = 'PENDING') AS pending,
-                COUNT(*) FILTER (WHERE status = 'PROCESS') AS process,
+                COUNT(*) FILTER (WHERE status IN ('PROCESS', 'REVIEW')) AS process,
                 COUNT(*) FILTER (WHERE status = 'VALID') AS valid,
-                COUNT(*) FILTER (WHERE clinical_priority = 'CITO' AND status IN ('PENDING', 'PROCESS')) AS cito
+                COUNT(*) FILTER (WHERE clinical_priority = 'CITO' AND status IN ('PENDING', 'PROCESS', 'REVIEW')) AS cito
             FROM radiology_orders
         ";
         $row = $this->query($sql)[0] ?? [];
@@ -198,7 +200,7 @@ class RadiologyModel extends Model {
 
         $sql .= "
             ORDER BY 
-                CASE WHEN ro.clinical_priority = 'CITO' AND ro.status IN ('PENDING', 'PROCESS') THEN 1 ELSE 2 END,
+                CASE WHEN ro.clinical_priority = 'CITO' AND ro.status IN ('PENDING', 'PROCESS', 'REVIEW') THEN 1 ELSE 2 END,
                 ro.created_at DESC
         ";
 
@@ -242,184 +244,77 @@ class RadiologyModel extends Model {
     /**
      * Radiografer memulai pemrosesan order (PENDING -> PROCESS)
      */
-    public function processOrder(int $orderId, int $radiographerId): array {
-        $order = $this->getOrderById($orderId);
-        if (!$order) {
-            return ['success' => false, 'message' => 'Order Radiologi tidak ditemukan.'];
-        }
-
-        if ($order['status'] === 'CANCELLED') {
-            return ['success' => false, 'message' => 'Order telah dibatalkan.'];
-        }
-
-        $this->execute(
-            "UPDATE radiology_orders SET status = 'PROCESS', radiographer_id = :rid WHERE id = :id",
-            [':rid' => $radiographerId, ':id' => $orderId]
-        );
-
-        AuditLogModel::log(
-            'PROCESS_RADIOLOGY_ORDER',
-            'RADIOLOGY',
-            "Radiografer mempersiapkan pasien dan memproses eksposur Order #{$order['order_number']}",
-            $radiographerId
-        );
-
-        return ['success' => true, 'message' => "Order #{$order['order_number']} dalam proses pemotretan radiologi."];
+    private function lockedOrder(int $id, int $actorId, ?int $revision, array $roles): array {
+        ClinicalWorkflow::requireRole($roles);
+        if ($actorId !== (int)$_SESSION['user_id']) throw new DomainException('Identitas pengguna tidak sesuai sesi.');
+        $row=$this->query('SELECT * FROM radiology_orders WHERE id=? FOR UPDATE',[$id])[0] ?? null;
+        if (!$row) throw new DomainException('Order radiologi tidak ditemukan.');
+        ClinicalWorkflow::revision($row,$revision);
+        ClinicalWorkflow::orderLinks($this->db,$row);
+        return $row;
     }
-
-    /**
-     * Upload & Simpan Gambar Radiologi (Konversi otomatis ke WebP max 1MB)
-     */
-    public function uploadImage(int $orderId, array $file, string $technicalNotes, int $radiographerId): array {
-        $order = $this->getOrderById($orderId);
-        if (!$order) {
-            return ['success' => false, 'message' => 'Order Radiologi tidak ditemukan.'];
-        }
-
-        if (!isset($file['error']) || $file['error'] !== UPLOAD_ERR_OK) {
-            return ['success' => false, 'message' => 'Gagal mengunggah berkas citra radiologi.'];
-        }
-
-        // Validasi tipe berkas
-        $allowedTypes = ['image/jpeg', 'image/png', 'image/webp'];
-        $finfo = finfo_open(FILEINFO_MIME_TYPE);
-        $mime = finfo_file($finfo, $file['tmp_name']);
-        finfo_close($finfo);
-
-        if (!in_array($mime, $allowedTypes)) {
-            return ['success' => false, 'message' => 'Format citra harus berupa JPEG, PNG, atau WEBP.'];
-        }
-
-        // Siapkan direktori penyimpanan
-        $targetDir = __DIR__ . '/../../assets/uploads/radiology/';
-        if (!is_dir($targetDir)) {
-            @mkdir($targetDir, 0777, true);
-        }
-
-        $baseName = 'rad_' . $orderId . '_' . time();
-        $targetWebpName = $baseName . '.webp';
-        $targetWebpPath = $targetDir . $targetWebpName;
-        $relativeWebpPath = 'assets/uploads/radiology/' . $targetWebpName;
-
-        // Eksekusi konversi ke WebP terkompresi
-        $converted = convert_image_to_webp($file['tmp_name'], $targetWebpPath, 82);
-        if (!$converted || !file_exists($targetWebpPath)) {
-            return ['success' => false, 'message' => 'Gagal mengonversi citra medis ke format WebP.'];
-        }
-
-        $finalSize = filesize($targetWebpPath);
-        if ($finalSize > 1048576) {
-            @unlink($targetWebpPath);
-            return ['success' => false, 'message' => 'Ukuran citra melebihi batas 1MB setelah optimasi.'];
-        }
-
-        // Upload ke Supabase Cloud Storage bucket 'simrs-radiology'
-        require_once __DIR__ . '/../../core/Storage.php';
-        $cloudUrl = Storage::upload('simrs-radiology', $targetWebpName, file_get_contents($targetWebpPath), 'image/webp');
-        $storedImagePath = $cloudUrl ?: $relativeWebpPath;
-
-        // Upsert radiology_results
-        $existingRes = $this->query("SELECT id FROM radiology_results WHERE radiology_order_id = :oid LIMIT 1", [':oid' => $orderId]);
-        if (!empty($existingRes)) {
-            $this->execute(
-                "UPDATE radiology_results SET
-                    image_path      = :path,
-                    image_filename  = :fname,
-                    technical_notes = :notes,
-                    uploaded_at     = NOW()
-                 WHERE radiology_order_id = :oid",
-                [
-                    ':path'  => $storedImagePath,
-                    ':fname' => $targetWebpName,
-                    ':notes' => clean($technicalNotes),
-                    ':oid'   => $orderId
-                ]
-            );
-        } else {
-            $this->execute(
-                "INSERT INTO radiology_results (radiology_order_id, image_path, image_filename, technical_notes, uploaded_at)
-                 VALUES (:oid, :path, :fname, :notes, NOW())",
-                [
-                    ':oid'   => $orderId,
-                    ':path'  => $storedImagePath,
-                    ':fname' => $targetWebpName,
-                    ':notes' => clean($technicalNotes)
-                ]
-            );
-        }
-
-        // Update status order & radiographer_id
-        $this->execute(
-            "UPDATE radiology_orders SET status = 'PROCESS', radiographer_id = :rid WHERE id = :id",
-            [':rid' => $radiographerId, ':id' => $orderId]
-        );
-
-        AuditLogModel::log(
-            'UPLOAD_RADIOLOGY_IMAGE',
-            'RADIOLOGY',
-            "Radiografer mengunggah citra radiologi WebP ({$finalSize} bytes) untuk Order #{$order['order_number']}",
-            $radiographerId
-        );
-
-        return [
-            'success'    => true,
-            'message'    => "Citra radiologi berhasil diunggah dan dikonversi ke WebP (" . round($finalSize / 1024, 1) . " KB).",
-            'image_path' => $relativeWebpPath
-        ];
+    public function processOrder(int $orderId, int $radiographerId, ?int $revision = null, string $noRm = '', string $schedule = ''): array {
+        return ClinicalWorkflow::transaction($this->db,function () use ($orderId,$radiographerId,$revision,$noRm,$schedule) {
+            $order=$this->lockedOrder($orderId,$radiographerId,$revision,['radiografer']);
+            if ($order['status']!=='PENDING') throw new DomainException('Hanya order menunggu yang dapat mulai diproses.');
+            $patient=$this->query('SELECT no_rm FROM patients WHERE id=?',[$order['patient_id']])[0] ?? [];
+            if (trim($noRm)==='' || !hash_equals((string)($patient['no_rm'] ?? ''),trim($noRm))) throw new DomainException('Nomor RM tidak cocok. Verifikasi kembali pasien dan pemeriksaan.');
+            $date=$schedule!=='' ? DateTime::createFromFormat('!Y-m-d\TH:i',$schedule) : null;
+            if ($schedule!=='' && (!$date || $date->format('Y-m-d\TH:i')!==$schedule)) throw new DomainException('Jadwal pemeriksaan tidak valid.');
+            $this->execute("UPDATE radiology_orders SET status='PROCESS',radiographer_id=?,scheduled_at=?,revision=revision+1 WHERE id=?",[$radiographerId,$date?$date->format('Y-m-d H:i:s'):null,$orderId]);
+            ClinicalWorkflow::audit($this->db,'VERIFY_PROCESS_RADIOLOGY','RADIOLOGY',"Verifikasi pasien #{$order['patient_id']}; order #$orderId");
+            return ['success'=>true,'message'=>'Pasien dan order terverifikasi. Pemeriksaan radiologi dalam proses.'];
+        });
     }
-
-    /**
-     * Dokter Spesialis Radiologi memberikan ekspertise klinis & validasi (PROCESS -> VALID)
-     */
-    public function saveExpertise(int $orderId, string $findings, string $conclusion, int $radiologistId): array {
-        $order = $this->getOrderById($orderId);
-        if (!$order) {
-            return ['success' => false, 'message' => 'Order Radiologi tidak ditemukan.'];
-        }
-
-        if (empty(trim($findings))) {
-            return ['success' => false, 'message' => 'Deskripsi temuan ekspertise radiologi wajib diisi.'];
-        }
-
-        if (empty(trim($conclusion))) {
-            return ['success' => false, 'message' => 'Kesimpulan diagnosis ekspertise radiologi wajib diisi.'];
-        }
-
-        // Cek keberadaan hasil citra
-        $existingRes = $this->query("SELECT id FROM radiology_results WHERE radiology_order_id = :oid LIMIT 1", [':oid' => $orderId]);
-        if (empty($existingRes)) {
-            return ['success' => false, 'message' => 'Citra radiologi belum diunggah oleh radiografer.'];
-        }
-
-        $this->execute(
-            "UPDATE radiology_results SET
-                expertise_findings   = :findings,
-                expertise_conclusion = :conclusion,
-                validated_at         = NOW()
-             WHERE radiology_order_id = :oid",
-            [
-                ':findings'   => clean($findings),
-                ':conclusion' => clean($conclusion),
-                ':oid'        => $orderId
-            ]
-        );
-
-        $this->execute(
-            "UPDATE radiology_orders SET status = 'VALID', completed_at = NOW(), radiologist_id = :spid WHERE id = :id",
-            [':spid' => $radiologistId, ':id' => $orderId]
-        );
-
-        AuditLogModel::log(
-            'VALIDATE_RADIOLOGY_EXPERTISE',
-            'RADIOLOGY',
-            "Dokter Spesialis Radiologi menyelesaikan ekspertise dan memvalidasi Order #{$order['order_number']}",
-            $radiologistId
-        );
-
-        return [
-            'success' => true,
-            'message' => "Ekspertise radiologi Order #{$order['order_number']} berhasil divalidasi dan terbit."
-        ];
+    public function uploadImage(int $orderId, array $file, string $technicalNotes, int $radiographerId, ?int $revision = null): array {
+        return ClinicalWorkflow::transaction($this->db,function () use ($orderId,$file,$technicalNotes,$radiographerId,$revision) {
+            $order=$this->lockedOrder($orderId,$radiographerId,$revision,['radiografer']);
+            if ($order['status']!=='PROCESS') throw new DomainException('Unggah citra hanya tersedia saat pemeriksaan dalam proses.');
+            $f=ClinicalWorkflow::file($file);
+            $notes=ClinicalWorkflow::text($technicalNotes);
+            if ($notes==='') throw new DomainException('Catatan hasil pemeriksaan/teknis radiografer wajib diisi.');
+            $this->execute('INSERT INTO radiology_image_files (radiology_order_id,mime_type,filename,content_base64,byte_size,uploaded_by) VALUES (?,?,?,?,?,?) ON CONFLICT (radiology_order_id) DO UPDATE SET mime_type=EXCLUDED.mime_type,filename=EXCLUDED.filename,content_base64=EXCLUDED.content_base64,byte_size=EXCLUDED.byte_size,uploaded_by=EXCLUDED.uploaded_by,uploaded_at=NOW()',[$orderId,$f['mime_type'],$f['filename'],$f['content_base64'],$f['byte_size'],$radiographerId]);
+            $path='index.php?c=radiology&a=image&id='.$orderId;
+            $exists=$this->query('SELECT id FROM radiology_results WHERE radiology_order_id=?',[$orderId]);
+            if ($exists) $this->execute('UPDATE radiology_results SET image_path=?,image_filename=?,technical_notes=?,uploaded_at=NOW(),expertise_findings=NULL,expertise_conclusion=NULL,validated_at=NULL WHERE radiology_order_id=?',[$path,$f['filename'],$notes,$orderId]);
+            else $this->execute('INSERT INTO radiology_results (radiology_order_id,image_path,image_filename,technical_notes) VALUES (?,?,?,?)',[$orderId,$path,$f['filename'],$notes]);
+            $this->execute("UPDATE radiology_orders SET status='REVIEW',radiographer_id=?,radiologist_id=NULL,completed_at=NULL,review_notes=NULL,revision=revision+1 WHERE id=?",[$radiographerId,$orderId]);
+            ClinicalWorkflow::audit($this->db,'UPLOAD_RADIOLOGY_IMAGE','RADIOLOGY',"Citra tersimpan untuk pasien #{$order['patient_id']}; order #$orderId");
+            return ['success'=>true,'message'=>'Citra dan catatan tersimpan. Menunggu tinjauan dokter radiologi.','image_path'=>$path];
+        });
+    }
+    public function saveExpertise(int $orderId, string $findings, string $conclusion, int $radiologistId, ?int $revision = null): array {
+        return ClinicalWorkflow::transaction($this->db,function () use ($orderId,$findings,$conclusion,$radiologistId,$revision) {
+            $order=$this->lockedOrder($orderId,$radiologistId,$revision,['dokter_radiologi']);
+            if ($order['status']!=='REVIEW') throw new DomainException('Order belum siap ditinjau atau sudah diterbitkan.');
+            $findings=ClinicalWorkflow::text($findings); $conclusion=ClinicalWorkflow::text($conclusion);
+            if ($findings==='' || $conclusion==='') throw new DomainException('Temuan dan kesimpulan radiologi wajib diisi.');
+            $result=$this->getOrderById($orderId);
+            if (empty($result['image_path'])) throw new DomainException('Citra pemeriksaan belum tersedia.');
+            $this->execute('UPDATE radiology_results SET expertise_findings=?,expertise_conclusion=?,validated_at=NULL WHERE radiology_order_id=?',[$findings,$conclusion,$orderId]);
+            $this->execute('UPDATE radiology_orders SET radiologist_id=?,revision=revision+1 WHERE id=?',[$radiologistId,$orderId]);
+            ClinicalWorkflow::audit($this->db,'SAVE_RADIOLOGY_DRAFT','RADIOLOGY',"Draf ekspertise order #$orderId");
+            return ['success'=>true,'message'=>'Draf ekspertise tersimpan. Tinjau sebelum validasi akhir.'];
+        });
+    }
+    public function validateExpertise(int $orderId, int $radiologistId, int $revision, bool $approve, string $reason = ''): array {
+        return ClinicalWorkflow::transaction($this->db,function () use ($orderId,$radiologistId,$revision,$approve,$reason) {
+            $order=$this->lockedOrder($orderId,$radiologistId,$revision,['dokter_radiologi']);
+            if ($order['status']!=='REVIEW') throw new DomainException('Order belum siap divalidasi atau sudah diterbitkan.');
+            if (!$approve) {
+                $reason=ClinicalWorkflow::text($reason);
+                if ($reason==='') throw new DomainException('Alasan pengembalian untuk perbaikan wajib diisi.');
+                $this->execute("UPDATE radiology_orders SET status='PROCESS',review_notes=?,radiologist_id=NULL,revision=revision+1 WHERE id=?",[$reason,$orderId]);
+                $this->execute('UPDATE radiology_results SET expertise_findings=NULL,expertise_conclusion=NULL,validated_at=NULL WHERE radiology_order_id=?',[$orderId]);
+            } else {
+                $result=$this->getOrderById($orderId);
+                if (empty($result['image_path']) || trim((string)$result['expertise_findings'])==='' || trim((string)$result['expertise_conclusion'])==='') throw new DomainException('Citra, temuan, dan kesimpulan harus lengkap sebelum validasi.');
+                $this->execute('UPDATE radiology_results SET validated_at=NOW() WHERE radiology_order_id=?',[$orderId]);
+                $this->execute("UPDATE radiology_orders SET status='VALID',completed_at=NOW(),radiologist_id=?,review_notes=NULL,revision=revision+1 WHERE id=?",[$radiologistId,$orderId]);
+            }
+            ClinicalWorkflow::audit($this->db,$approve?'VALIDATE_RADIOLOGY_EXPERTISE':'RETURN_RADIOLOGY','RADIOLOGY',"Order #$orderId" . ($approve?'':'; '.$reason));
+            return ['success'=>true,'message'=>$approve?'Hasil radiologi VALID dan tersedia di EMR.':'Order dikembalikan kepada radiografer untuk perbaikan.'];
+        });
     }
 
     /**
@@ -431,8 +326,8 @@ class RadiologyModel extends Model {
                     u_doc.full_name AS doctor_name, 
                     u_rad.full_name AS radiographer_name,
                     u_sp.full_name AS radiologist_name,
-                    rr.image_path, rr.image_filename, rr.technical_notes,
-                    rr.expertise_findings, rr.expertise_conclusion, rr.validated_at
+                    CASE WHEN ro.status='VALID' THEN rr.image_path END AS image_path, rr.image_filename, rr.technical_notes,
+                    CASE WHEN ro.status='VALID' THEN rr.expertise_findings END AS expertise_findings, CASE WHEN ro.status='VALID' THEN rr.expertise_conclusion END AS expertise_conclusion, rr.validated_at
              FROM radiology_orders ro
              LEFT JOIN users u_doc ON ro.doctor_id = u_doc.id
              LEFT JOIN users u_rad ON ro.radiographer_id = u_rad.id
