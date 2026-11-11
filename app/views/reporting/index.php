@@ -368,9 +368,9 @@
         <?php else: ?>
           <?php foreach ($topMorbidity as $m): ?>
             <tr>
-              <td class="font-mono fw-bold text-primary"><?= htmlspecialchars($m['icd_code']) ?></td>
-              <td><?= htmlspecialchars($m['icd_name']) ?></td>
-              <td class="text-end fw-bold font-mono"><?= $m['total_cases'] ?></td>
+            <td class="font-mono fw-bold text-primary"><?= htmlspecialchars($m['icd_code'] ?? '-') ?></td>
+<td><?= htmlspecialchars($m['icd_name'] ?? '-') ?></td>
+<td class="text-end fw-bold font-mono"><?= (int)($m['total_cases'] ?? 0) ?></td>
             </tr>
           <?php endforeach; ?>
         <?php endif; ?>
