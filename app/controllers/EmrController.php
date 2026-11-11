@@ -68,7 +68,8 @@ class EmrController extends Controller {
      * Form Pengisian Rekam Medis (SOAP, Tanda Vital, ICD-10, Order Lab & Rad)
      */
     public function examine(): void {
-        $this->requireRole(['admin', 'dokter']);
+        $this->requireRole(['admin', 'dokter', 'perawat']);
+        $isNurse = EmrModel::isNursingRole();
         $appointmentId = (int)($_GET['id'] ?? $_GET['appointment_id'] ?? 0);
         if ($appointmentId <= 0) {
             $this->setFlash('danger', 'ID Kunjungan / Antrean tidak valid.');
@@ -84,7 +85,7 @@ class EmrController extends Controller {
         }
 
         // Jika status antrean masih SCHEDULED, ubah ke IN_PROGRESS tanda dokter sedang memeriksa
-        if ($appointment['status'] === 'SCHEDULED') {
+        if (!$isNurse && $appointment['status'] === 'SCHEDULED') {
             $emrModel->execute("UPDATE appointments SET status = 'IN_PROGRESS' WHERE id = :id", [':id' => $appointmentId]);
             $appointment['status'] = 'IN_PROGRESS';
         }
@@ -105,7 +106,8 @@ class EmrController extends Controller {
             'allergies'      => $allergies,
             'history'        => $history,
             'icdList'        => $icdList,
-            'labTests'       => $labTests
+            'labTests'       => $labTests,
+            'isNurse'        => $isNurse
         ]);
     }
 
@@ -113,7 +115,7 @@ class EmrController extends Controller {
      * Simpan Rekam Medis (Enforce Aturan Validasi SOP: ICD-10 Wajib Diisi)
      */
     public function save(): void {
-        $this->requireRole(['admin', 'dokter']);
+        $this->requireRole(['admin', 'dokter', 'perawat']);
         if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
             $this->redirect('index.php?c=emr&a=index');
         }
@@ -127,8 +129,8 @@ class EmrController extends Controller {
         $patientId     = (int)($_POST['patient_id'] ?? 0);
         $icd10Code     = trim($_POST['icd10_code'] ?? '');
 
-        // ATURAN KETAT SOP EMR LANGKAH 6: Jika Kode ICD-10 Kosong, Abort & Tampilkan Alert!
-        if (empty($icd10Code)) {
+        // Diagnosis wajib untuk penyimpanan dokter, bukan pencatatan perawat.
+        if (!EmrModel::isNursingRole() && empty($icd10Code)) {
             $this->setFlash('danger', 'Kode ICD-10 Wajib Diisi!');
             $this->redirect('index.php?c=emr&a=examine&id=' . $appointmentId);
         }
