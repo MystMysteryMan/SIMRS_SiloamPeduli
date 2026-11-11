@@ -248,8 +248,8 @@ class RadiologyModel extends Model {
             return ['success' => false, 'message' => 'Order Radiologi tidak ditemukan.'];
         }
 
-        if ($order['status'] === 'CANCELLED') {
-            return ['success' => false, 'message' => 'Order telah dibatalkan.'];
+        if (!in_array($order['status'], ['PENDING', 'PROCESS'], true)) {
+            return ['success' => false, 'message' => 'Order ini tidak dapat diproses ulang.'];
         }
 
         $this->execute(
@@ -267,105 +267,104 @@ class RadiologyModel extends Model {
         return ['success' => true, 'message' => "Order #{$order['order_number']} dalam proses pemotretan radiologi."];
     }
 
-    /**
-     * Upload & Simpan Gambar Radiologi (Konversi otomatis ke WebP max 1MB)
+    /** Store original image bytes in the existing PostgreSQL database.
+     * Vercel has no durable local upload directory and GD is optional.
      */
+    private function ensureImageStorage(): void {
+        if ($this->db->query("SELECT to_regclass('public.radiology_image_files')")->fetchColumn()) {
+            return;
+        }
+        // Additive, module-local initialization; no existing rows are changed.
+        $this->db->exec("CREATE TABLE IF NOT EXISTS public.radiology_image_files (
+            radiology_order_id INTEGER PRIMARY KEY REFERENCES radiology_orders(id),
+            mime_type VARCHAR(20) NOT NULL CHECK (mime_type IN ('image/jpeg','image/png','image/webp')),
+            image_data TEXT NOT NULL,
+            byte_size INTEGER NOT NULL CHECK (byte_size > 0 AND byte_size <= 1048576),
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )");
+        // Files are served through the authenticated controller, never the public REST API.
+        $this->db->exec("ALTER TABLE public.radiology_image_files ENABLE ROW LEVEL SECURITY");
+        $this->db->exec("REVOKE ALL ON public.radiology_image_files FROM PUBLIC");
+        foreach (['anon', 'authenticated'] as $role) {
+            if ($this->query('SELECT 1 FROM pg_roles WHERE rolname = :role', [':role' => $role])) {
+                $this->db->exec('REVOKE ALL ON public.radiology_image_files FROM ' . $role);
+            }
+        }
+    }
+
+    public function getStoredImage(int $orderId): ?array {
+        if (!$this->db->query("SELECT to_regclass('public.radiology_image_files')")->fetchColumn()) {
+            return null;
+        }
+        $rows = $this->query("SELECT f.mime_type, f.image_data, f.byte_size, rr.image_filename
+            FROM public.radiology_image_files f
+            JOIN radiology_results rr ON rr.radiology_order_id = f.radiology_order_id
+            WHERE f.radiology_order_id = :id LIMIT 1", [':id' => $orderId]);
+        return $rows[0] ?? null;
+    }
+
+    public static function hasImage(array $result): bool {
+        $path = $result['image_path'] ?? '';
+        return $path !== '' && (
+            preg_match('~^index\.php\?c=radiology&a=image&id=[1-9][0-9]*$~D', $path) === 1
+            || preg_match('~^https?://~i', $path) === 1
+            || is_file(__DIR__ . '/../../' . $path)
+        );
+    }
+
     public function uploadImage(int $orderId, array $file, string $technicalNotes, int $radiographerId): array {
-        $order = $this->getOrderById($orderId);
-        if (!$order) {
-            return ['success' => false, 'message' => 'Order Radiologi tidak ditemukan.'];
+        if (($file['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK
+            || !is_uploaded_file($file['tmp_name'] ?? '')) {
+            return ['success' => false, 'message' => 'Pilih berkas citra radiologi yang valid.'];
         }
-
-        if (!isset($file['error']) || $file['error'] !== UPLOAD_ERR_OK) {
-            return ['success' => false, 'message' => 'Gagal mengunggah berkas citra radiologi.'];
+        $size = filesize($file['tmp_name']);
+        if (!$size || $size > 1048576) {
+            return ['success' => false, 'message' => 'Ukuran citra maksimal 1 MB. Pilih berkas yang lebih kecil.'];
         }
-
-        // Validasi tipe berkas
-        $allowedTypes = ['image/jpeg', 'image/png', 'image/webp'];
-        $finfo = finfo_open(FILEINFO_MIME_TYPE);
-        $mime = finfo_file($finfo, $file['tmp_name']);
-        finfo_close($finfo);
-
-        if (!in_array($mime, $allowedTypes)) {
-            return ['success' => false, 'message' => 'Format citra harus berupa JPEG, PNG, atau WEBP.'];
+        $mime = (new finfo(FILEINFO_MIME_TYPE))->file($file['tmp_name']);
+        $extensions = ['image/jpeg' => 'jpg', 'image/png' => 'png', 'image/webp' => 'webp'];
+        $dimensions = @getimagesize($file['tmp_name']);
+        if (!isset($extensions[$mime]) || !$dimensions || ($dimensions['mime'] ?? '') !== $mime) {
+            return ['success' => false, 'message' => 'Format citra harus berupa JPG, PNG, atau WebP yang dapat dibaca.'];
         }
-
-        // Siapkan direktori penyimpanan
-        $targetDir = __DIR__ . '/../../assets/uploads/radiology/';
-        if (!is_dir($targetDir)) {
-            @mkdir($targetDir, 0777, true);
+        $bytes = file_get_contents($file['tmp_name']);
+        if ($bytes === false || strlen($bytes) !== $size) {
+            return ['success' => false, 'message' => 'Berkas citra tidak dapat dibaca. Silakan unggah kembali.'];
         }
-
-        $baseName = 'rad_' . $orderId . '_' . time();
-        $targetWebpName = $baseName . '.webp';
-        $targetWebpPath = $targetDir . $targetWebpName;
-        $relativeWebpPath = 'assets/uploads/radiology/' . $targetWebpName;
-
-        // Eksekusi konversi ke WebP terkompresi
-        $converted = convert_image_to_webp($file['tmp_name'], $targetWebpPath, 82);
-        if (!$converted || !file_exists($targetWebpPath)) {
-            return ['success' => false, 'message' => 'Gagal mengonversi citra medis ke format WebP.'];
+        try {
+            $this->db->beginTransaction();
+            $rows = $this->query('SELECT id, order_number, status FROM radiology_orders WHERE id = :id FOR UPDATE', [':id' => $orderId]);
+            $order = $rows[0] ?? null;
+            if (!$order || $order['status'] !== 'PROCESS') {
+                $this->db->rollBack();
+                return ['success' => false, 'message' => 'Citra hanya dapat diunggah pada order yang sedang diproses.'];
+            }
+            $this->ensureImageStorage();
+            $this->execute("INSERT INTO public.radiology_image_files (radiology_order_id, mime_type, image_data, byte_size)
+                VALUES (:id, :mime, :data, :size)
+                ON CONFLICT (radiology_order_id) DO UPDATE SET mime_type = EXCLUDED.mime_type,
+                image_data = EXCLUDED.image_data, byte_size = EXCLUDED.byte_size, updated_at = CURRENT_TIMESTAMP",
+                [':id' => $orderId, ':mime' => $mime, ':data' => base64_encode($bytes), ':size' => $size]);
+            $path = 'index.php?c=radiology&a=image&id=' . $orderId;
+            $filename = 'rad_' . $orderId . '.' . $extensions[$mime];
+            $params = [':oid' => $orderId, ':path' => $path, ':fname' => $filename, ':notes' => clean($technicalNotes)];
+            if ($this->query('SELECT id FROM radiology_results WHERE radiology_order_id = :oid', [':oid' => $orderId])) {
+                $this->execute("UPDATE radiology_results SET image_path = :path, image_filename = :fname,
+                    technical_notes = :notes, uploaded_at = NOW() WHERE radiology_order_id = :oid", $params);
+            } else {
+                $this->execute("INSERT INTO radiology_results (radiology_order_id, image_path, image_filename, technical_notes, uploaded_at)
+                    VALUES (:oid, :path, :fname, :notes, NOW())", $params);
+            }
+            $this->execute('UPDATE radiology_orders SET radiographer_id = :rid WHERE id = :id', [':rid' => $radiographerId, ':id' => $orderId]);
+            AuditLogModel::log('UPLOAD_RADIOLOGY_IMAGE', 'RADIOLOGY',
+                "Citra radiologi tersimpan untuk Order #{$order['order_number']} ({$size} bytes)", $radiographerId);
+            $this->db->commit();
+            return ['success' => true, 'message' => 'Citra radiologi berhasil diunggah dan disimpan.', 'image_path' => $path];
+        } catch (Throwable $e) {
+            if ($this->db->inTransaction()) $this->db->rollBack();
+            error_log('Radiology image storage failed: ' . get_class($e) . ' [' . $e->getCode() . ']');
+            return ['success' => false, 'message' => 'Citra belum tersimpan. Silakan coba kembali atau hubungi administrator.'];
         }
-
-        $finalSize = filesize($targetWebpPath);
-        if ($finalSize > 1048576) {
-            @unlink($targetWebpPath);
-            return ['success' => false, 'message' => 'Ukuran citra melebihi batas 1MB setelah optimasi.'];
-        }
-
-        // Upload ke Supabase Cloud Storage bucket 'simrs-radiology'
-        require_once __DIR__ . '/../../core/Storage.php';
-        $cloudUrl = Storage::upload('simrs-radiology', $targetWebpName, file_get_contents($targetWebpPath), 'image/webp');
-        $storedImagePath = $cloudUrl ?: $relativeWebpPath;
-
-        // Upsert radiology_results
-        $existingRes = $this->query("SELECT id FROM radiology_results WHERE radiology_order_id = :oid LIMIT 1", [':oid' => $orderId]);
-        if (!empty($existingRes)) {
-            $this->execute(
-                "UPDATE radiology_results SET
-                    image_path      = :path,
-                    image_filename  = :fname,
-                    technical_notes = :notes,
-                    uploaded_at     = NOW()
-                 WHERE radiology_order_id = :oid",
-                [
-                    ':path'  => $storedImagePath,
-                    ':fname' => $targetWebpName,
-                    ':notes' => clean($technicalNotes),
-                    ':oid'   => $orderId
-                ]
-            );
-        } else {
-            $this->execute(
-                "INSERT INTO radiology_results (radiology_order_id, image_path, image_filename, technical_notes, uploaded_at)
-                 VALUES (:oid, :path, :fname, :notes, NOW())",
-                [
-                    ':oid'   => $orderId,
-                    ':path'  => $storedImagePath,
-                    ':fname' => $targetWebpName,
-                    ':notes' => clean($technicalNotes)
-                ]
-            );
-        }
-
-        // Update status order & radiographer_id
-        $this->execute(
-            "UPDATE radiology_orders SET status = 'PROCESS', radiographer_id = :rid WHERE id = :id",
-            [':rid' => $radiographerId, ':id' => $orderId]
-        );
-
-        AuditLogModel::log(
-            'UPLOAD_RADIOLOGY_IMAGE',
-            'RADIOLOGY',
-            "Radiografer mengunggah citra radiologi WebP ({$finalSize} bytes) untuk Order #{$order['order_number']}",
-            $radiographerId
-        );
-
-        return [
-            'success'    => true,
-            'message'    => "Citra radiologi berhasil diunggah dan dikonversi ke WebP (" . round($finalSize / 1024, 1) . " KB).",
-            'image_path' => $relativeWebpPath
-        ];
     }
 
     /**
