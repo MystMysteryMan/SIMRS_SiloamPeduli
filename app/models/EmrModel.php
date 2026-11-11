@@ -3,8 +3,10 @@
 
 require_once __DIR__ . '/../../core/Model.php';
 require_once __DIR__ . '/AuditLogModel.php';
+require_once __DIR__ . '/EmrWorkflow.php';
 
 class EmrModel extends Model {
+    use EmrWorkflow;
     protected string $table = 'medical_records';
 
     /**

@@ -9,7 +9,7 @@
       <span>Laboratorium Sentral</span>
     </h1>
     <p style="margin: 4px 0 0; color: var(--muted); font-size: 13px;">
-      Penerimaan sampel darah &amp; spesimen klinis, pengujian analitik, evaluasi nilai kritis, dan penerbitan lembar hasil resmi.
+      Penerimaan dan verifikasi order, pencatatan dan validasi hasil, serta penyimpanan dan pencetakan laporan.
     </p>
   </div>
   <div style="display: flex; gap: 8px;">
@@ -34,27 +34,27 @@
   </div>
   <div class="stat-card" style="border-left: 3px solid var(--amber-500);">
     <div class="top">
-      <span>Menunggu Sampel</span>
+      <span>Menunggu Verifikasi</span>
     </div>
     <div class="num" style="color: var(--amber-700);"><?= $stats['pending'] ?></div>
     <div class="desc">
       <span class="badge badge-warning"><?= $stats['pending'] ?> Order</span>
-      <span>flebotomi &amp; spesimen</span>
+      <span>order belum diproses</span>
     </div>
   </div>
   <div class="stat-card" style="border-left: 3px solid var(--blue-500);">
     <div class="top">
-      <span>Sedang Diuji (Analitik)</span>
+      <span>Proses &amp; Validasi</span>
     </div>
     <div class="num" style="color: var(--blue-700);"><?= $stats['process'] ?></div>
     <div class="desc">
       <span class="badge badge-info"><?= $stats['process'] ?> Spesimen</span>
-      <span>pemeriksaan instrumen</span>
+      <span>pemeriksaan hingga simpan</span>
     </div>
   </div>
   <div class="stat-card" style="border-left: 3px solid var(--red-500);">
     <div class="top">
-      <span>Permintaan CITO (Darurat)</span>
+      <span>Permintaan CITO</span>
     </div>
     <div class="num" style="color: var(--red-700);"><?= $stats['cito'] ?></div>
     <div class="desc">
@@ -81,7 +81,9 @@
         <option value="">-- Semua Status --</option>
         <option value="PENDING" <?= ($selectedStatus === 'PENDING') ? 'selected' : '' ?>>PENDING (Menunggu)</option>
         <option value="PROCESS" <?= ($selectedStatus === 'PROCESS') ? 'selected' : '' ?>>PROCESS (Pengujian)</option>
-        <option value="VALID" <?= ($selectedStatus === 'VALID') ? 'selected' : '' ?>>VALID (Selesai)</option>
+        <option value="REVIEW" <?= ($selectedStatus === 'REVIEW') ? 'selected' : '' ?>>Menunggu Validasi</option>
+          <option value="VALIDATED" <?= ($selectedStatus === 'VALIDATED') ? 'selected' : '' ?>>Tervalidasi — Belum Disimpan</option>
+          <option value="VALID" <?= ($selectedStatus === 'VALID') ? 'selected' : '' ?>>VALID (Selesai)</option>
       </select>
     </div>
 
@@ -145,10 +147,16 @@
               $statusLabel = 'Menunggu';
               if ($st === 'PENDING') {
                   $badgeClass = 'badge-warning';
-                  $statusLabel = 'Menunggu Sampel';
+                  $statusLabel = 'Menunggu Verifikasi';
               } elseif ($st === 'PROCESS') {
                   $badgeClass = 'badge-info';
                   $statusLabel = 'Sedang Diuji';
+              } elseif ($st === 'REVIEW') {
+                  $badgeClass = 'badge-info';
+                  $statusLabel = 'Menunggu Validasi';
+              } elseif ($st === 'VALIDATED') {
+                  $badgeClass = 'badge-info';
+                  $statusLabel = 'Tervalidasi — Belum Disimpan';
               } elseif ($st === 'VALID') {
                   $badgeClass = 'badge-success';
                   $statusLabel = 'Valid (Selesai)';
@@ -201,7 +209,7 @@
                      class="btn <?= ($st === 'VALID') ? 'btn-outline' : 'btn-primary' ?>" 
                      style="height: 32px; padding: 0 10px; font-size: 12px;">
                     <i data-lucide="<?= ($st === 'VALID') ? 'eye' : 'edit-3' ?>"></i>
-                    <span><?= ($st === 'PENDING') ? 'Ambil Sampel' : (($st === 'PROCESS') ? 'Input Hasil' : 'Detail') ?></span>
+                    <span><?= ['PENDING'=>'Verifikasi Order','PROCESS'=>'Input Hasil','REVIEW'=>'Tinjau Hasil','VALIDATED'=>'Simpan Hasil','VALID'=>'Detail / Cetak'][$st] ?? 'Detail' ?></span>
                   </a>
                   <?php if ($st === 'VALID'): ?>
                     <a href="<?= base_url('index.php?c=laboratory&a=printResult&id=' . $o['id']) ?>" 

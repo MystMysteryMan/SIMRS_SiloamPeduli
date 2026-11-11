@@ -9,7 +9,7 @@
       <span>Radiologi &amp; Diagnostik Imaging</span>
     </h1>
     <p style="margin: 4px 0 0; color: var(--muted); font-size: 13px;">
-      Antrean tindakan pemotretan radiologi, digitalisasi citra WebP, serta pembacaan ekspertise spesialis radiologi.
+      Antrean tindakan pemotretan radiologi, penyimpanan citra pemeriksaan, serta pembacaan ekspertise spesialis radiologi.
     </p>
   </div>
   <div style="display: flex; gap: 8px;">
@@ -81,7 +81,8 @@
         <option value="">-- Semua Status --</option>
         <option value="PENDING" <?= ($selectedStatus === 'PENDING') ? 'selected' : '' ?>>PENDING (Menunggu)</option>
         <option value="PROCESS" <?= ($selectedStatus === 'PROCESS') ? 'selected' : '' ?>>PROCESS (Proses Citra)</option>
-        <option value="VALID" <?= ($selectedStatus === 'VALID') ? 'selected' : '' ?>>VALID (Ekspertise Selesai)</option>
+        <option value="REVIEW" <?= ($selectedStatus === 'REVIEW') ? 'selected' : '' ?>>Menunggu Validasi</option>
+          <option value="VALID" <?= ($selectedStatus === 'VALID') ? 'selected' : '' ?>>VALID (Ekspertise Selesai)</option>
       </select>
     </div>
 
@@ -149,6 +150,9 @@
               } elseif ($st === 'PROCESS') {
                   $badgeClass = 'badge-info';
                   $statusLabel = 'Proses Citra';
+              } elseif ($st === 'REVIEW') {
+                  $badgeClass = 'badge-info';
+                  $statusLabel = 'Menunggu Validasi';
               } elseif ($st === 'VALID') {
                   $badgeClass = 'badge-success';
                   $statusLabel = 'Valid (Selesai)';
