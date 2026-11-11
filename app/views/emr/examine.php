@@ -1,5 +1,7 @@
 <?php
 // app/views/emr/examine.php - Lembar Pemeriksaan EMR Terintegrasi
+$isNurse = $isNurse ?? EmrModel::isNursingRole();
+$doctorReadonly = $isNurse ? 'readonly aria-readonly="true"' : '';
 $patAge = !empty($appointment['birth_date']) ? (date('Y') - date('Y', strtotime($appointment['birth_date']))) : '-';
 ?>
 
@@ -141,57 +143,52 @@ $patAge = !empty($appointment['birth_date']) ? (date('Y') - date('Y', strtotime(
         <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 14px; border-bottom: 1px solid var(--border); padding-bottom: 10px;">
           <i data-lucide="clipboard-list" style="color: var(--blue-600); width: 18px; height: 18px;"></i>
           <b style="color: var(--blue-900); font-size: 14.5px;">2. Catatan Medis SOAP</b>
+          <?php if ($isNurse): ?><span style="font-size: 12px; color: var(--muted);">Hanya dapat diubah dokter</span><?php endif; ?>
         </div>
 
         <div class="form-group">
           <label class="form-label" style="font-size: 12px;">
             <b>S - Subjektif (Anamnesis / Keluhan Utama):</b>
           </label>
-          <textarea name="subjective" class="form-control" rows="3" placeholder="Pasien mengeluh demam sejak 3 hari yang lalu disertai batuk berdahak dan badan lemas..."><?= htmlspecialchars($record['subjective'] ?? $appointment['chief_complaint'] ?? '') ?></textarea>
+          <textarea <?= $doctorReadonly ?> name="subjective" class="form-control" rows="3" placeholder="Pasien mengeluh demam sejak 3 hari yang lalu disertai batuk berdahak dan badan lemas..."><?= htmlspecialchars($record['subjective'] ?? $appointment['chief_complaint'] ?? '') ?></textarea>
         </div>
 
         <div class="form-group">
           <label class="form-label" style="font-size: 12px;">
             <b>O - Objektif (Hasil Pemeriksaan Fisik &amp; Penunjang):</b>
           </label>
-          <textarea name="objective" class="form-control" rows="3" placeholder="Keadaan umum: Tampak sakit sedang, compos mentis. Suara napas vesikuler, tidak ada ronki maupun wheezing..."><?= htmlspecialchars($record['objective'] ?? '') ?></textarea>
+          <textarea <?= $doctorReadonly ?> name="objective" class="form-control" rows="3" placeholder="Keadaan umum: Tampak sakit sedang, compos mentis. Suara napas vesikuler, tidak ada ronki maupun wheezing..."><?= htmlspecialchars($record['objective'] ?? '') ?></textarea>
         </div>
 
         <div class="form-group">
           <label class="form-label" style="font-size: 12px;">
             <b>A - Asesmen Klinis Dokter:</b>
           </label>
-          <textarea name="assessment" class="form-control" rows="2" placeholder="Kecurigaan infeksi saluran pernapasan atas akut dengan demam..."><?= htmlspecialchars($record['assessment'] ?? '') ?></textarea>
+          <textarea <?= $doctorReadonly ?> name="assessment" class="form-control" rows="2" placeholder="Kecurigaan infeksi saluran pernapasan atas akut dengan demam..."><?= htmlspecialchars($record['assessment'] ?? '') ?></textarea>
         </div>
 
         <div class="form-group" style="margin: 0;">
           <label class="form-label" style="font-size: 12px;">
             <b>P - Plan (Rencana Tatalaksana, Resep, &amp; Edukasi):</b>
           </label>
-          <textarea name="plan" class="form-control" rows="3" placeholder="Terapi simtomatik, anjuran hidrasi adekuat, istirahat cukup, edukasi tanda bahaya..."><?= htmlspecialchars($record['plan'] ?? '') ?></textarea>
+          <textarea <?= $doctorReadonly ?> name="plan" class="form-control" rows="3" placeholder="Terapi simtomatik, anjuran hidrasi adekuat, istirahat cukup, edukasi tanda bahaya..."><?= htmlspecialchars($record['plan'] ?? '') ?></textarea>
         </div>
       </div>
 
-      <!-- BAGIAN 3: DIAGNOSIS ICD-10 (SOP LANGKAH 6 - MANDATORY) -->
-      <div class="card" style="margin-bottom: 20px; border-left: 4px solid var(--amber-600);">
+      <!-- BAGIAN 3: DIAGNOSIS ICD-10 -->
+      <div class="card" style="margin-bottom: 20px;">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; border-bottom: 1px solid var(--border); padding-bottom: 10px;">
           <div style="display: flex; align-items: center; gap: 8px;">
-            <i data-lucide="book-open" style="color: var(--amber-600); width: 18px; height: 18px;"></i>
+            <i data-lucide="book-open" style="color: var(--blue-600); width: 18px; height: 18px;"></i>
             <b style="color: var(--blue-900); font-size: 14.5px;">3. Kodifikasi Diagnosa ICD-10</b>
           </div>
-          <span class="badge badge-danger">Wajib Diisi (SOP ICD-10)</span>
-        </div>
-
-        <div style="background: #fffbeb; border: 1px solid #fde68a; border-radius: 6px; padding: 10px 14px; margin-bottom: 14px; font-size: 12px; color: #92400e; display: flex; align-items: center; gap: 8px;">
-          <i data-lucide="info" style="width: 16px; height: 16px; flex-shrink: 0;"></i>
-          <span><b>Instruksi SOP Langkah 6:</b> Rekam Medis tidak dapat disimpan tanpa Kode ICD-10 yang valid.</span>
         </div>
 
         <div style="display: grid; grid-template-columns: 180px 1fr; gap: 14px; margin-bottom: 14px;">
           <div class="form-group" style="margin: 0;">
-            <label class="form-label" style="font-size: 12px;">Kode ICD-10 <span style="color: var(--red-600);">*</span></label>
+            <label class="form-label" style="font-size: 12px;">Kode ICD-10 <?php if (!$isNurse): ?><span style="color: var(--red-600);">*</span><?php endif; ?></label>
             <input type="text" id="icd10_code" name="icd10_code" list="icdListOptions" class="form-control font-mono" 
-                   placeholder="Contoh: J06.9" required value="<?= htmlspecialchars($record['icd10_code'] ?? '') ?>"
+                   placeholder="Contoh: J06.9" <?= $isNurse ? $doctorReadonly : 'required' ?> value="<?= htmlspecialchars($record['icd10_code'] ?? '') ?>"
                    onchange="autoFillDiagnosisName(this.value)">
             <datalist id="icdListOptions">
               <?php foreach ($icdList as $icd): ?>
@@ -202,12 +199,13 @@ $patAge = !empty($appointment['birth_date']) ? (date('Y') - date('Y', strtotime(
 
           <div class="form-group" style="margin: 0;">
             <label class="form-label" style="font-size: 12px;">Nama Diagnosis Klinis</label>
-            <input type="text" id="diagnosis_name" name="diagnosis_name" class="form-control" 
+            <input type="text" <?= $doctorReadonly ?> id="diagnosis_name" name="diagnosis_name" class="form-control"
                    placeholder="Nama diagnosis otomatis terisi sesuai kode ICD-10" 
                    value="<?= htmlspecialchars($record['diagnosis_name'] ?? '') ?>">
           </div>
         </div>
 
+        <?php if (!$isNurse): ?>
         <!-- Pilihan Cepat ICD-10 -->
         <div style="margin-top: 8px;">
           <span style="font-size: 11.5px; color: var(--muted); margin-bottom: 4px; display: block;">Diagnosa Umum Sering Digunakan:</span>
@@ -221,6 +219,7 @@ $patAge = !empty($appointment['birth_date']) ? (date('Y') - date('Y', strtotime(
           </div>
         </div>
 
+        <?php endif; ?>
         <div class="form-group" style="margin-top: 14px; margin-bottom: 0;">
           <label class="form-label" style="font-size: 12px;">Catatan Klinis Tambahan / Instruksi Khusus</label>
           <input type="text" name="clinical_notes" class="form-control" placeholder="Contoh: Rencana kontrol 5 hari lagi jika keluhan belum membaik" 
@@ -228,6 +227,7 @@ $patAge = !empty($appointment['birth_date']) ? (date('Y') - date('Y', strtotime(
         </div>
       </div>
 
+      <?php if (!$isNurse): ?>
       <!-- BAGIAN 4: ORDER PENUNJANG (INTEGRASI PENUNJANG) -->
       <div class="card" style="margin-bottom: 20px;">
         <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 14px; border-bottom: 1px solid var(--border); padding-bottom: 10px;">
@@ -316,11 +316,12 @@ $patAge = !empty($appointment['birth_date']) ? (date('Y') - date('Y', strtotime(
         </div>
       </div>
 
+      <?php endif; ?>
       <!-- BAGIAN 5: TAMBAH CATATAN ALERGI BARU (JIKA ADA) -->
       <div class="card" style="margin-bottom: 24px;">
         <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 14px; border-bottom: 1px solid var(--border); padding-bottom: 10px;">
           <i data-lucide="shield-alert" style="color: var(--red-600); width: 18px; height: 18px;"></i>
-          <b style="color: var(--blue-900); font-size: 14.5px;">5. Tambah Alergi Pasien (Jika Ada)</b>
+          <b style="color: var(--blue-900); font-size: 14.5px;"><?= $isNurse ? '4' : '5' ?>. Tambah Alergi Pasien (Jika Ada)</b>
         </div>
 
         <div style="display: grid; grid-template-columns: 1fr 140px 1.5fr; gap: 12px;">
@@ -347,7 +348,7 @@ $patAge = !empty($appointment['birth_date']) ? (date('Y') - date('Y', strtotime(
       <div style="display: flex; gap: 12px; align-items: center;">
         <button type="submit" class="btn btn-primary" style="height: 44px; padding: 0 24px; font-size: 14px; font-weight: 600;">
           <i data-lucide="check-circle-2"></i>
-          <span>Simpan &amp; Selesaikan Pemeriksaan</span>
+          <span><?= $isNurse ? 'Simpan Catatan Perawat' : 'Simpan &amp; Selesaikan Pemeriksaan' ?></span>
         </button>
         <a href="<?= base_url('index.php?c=emr&a=index') ?>" class="btn btn-outline" style="height: 44px; padding: 0 18px;">
           <i data-lucide="x"></i>
@@ -418,11 +419,13 @@ function calculateBMI() {
 }
 
 function selectQuickIcd(code, name) {
+  if (document.getElementById('icd10_code').readOnly) return;
   document.getElementById('icd10_code').value = code;
   document.getElementById('diagnosis_name').value = name;
 }
 
 function autoFillDiagnosisName(code) {
+  if (document.getElementById('icd10_code').readOnly) return;
   const datalist = document.getElementById('icdListOptions');
   const options = datalist.querySelectorAll('option');
   for (let opt of options) {
@@ -447,10 +450,10 @@ function toggleRadOrder(checked) {
   badge.className = checked ? 'badge badge-primary' : 'badge badge-secondary';
 }
 
-// Client-side guard for SOP Step 6
+// Require a diagnosis code before saving.
 document.getElementById('emrForm').addEventListener('submit', function(e) {
   const icd = document.getElementById('icd10_code').value.trim();
-  if (!icd) {
+  if (document.getElementById('icd10_code').required && !icd) {
     e.preventDefault();
     alert('Kode ICD-10 Wajib Diisi!');
     document.getElementById('icd10_code').focus();
